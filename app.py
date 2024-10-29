@@ -217,7 +217,6 @@ if st.sidebar.button("Run Profiling"):
                 numeric_selected_features = [col for col in selected_features if col in numeric_cols]
                 
                 corr_result = st.session_state['data'][numeric_selected_features].corr(method=method.lower())
-                st.write(f"**{method} Correlation Matrix**")
 
                 # Display heatmap using Plotly
                 fig = px.imshow(
@@ -233,7 +232,8 @@ if st.sidebar.button("Run Profiling"):
                     height=600,
                 )
                 st.plotly_chart(fig)
-
+                
+                st.write(f"**{method} Correlation Matrix**")
                 # Define a function to highlight cells based on the threshold
                 def highlight_corr(val):
                     color = 'yellow' if abs(val) > float(st.session_state.get('top_corr_thr', 0.7)) else ''
