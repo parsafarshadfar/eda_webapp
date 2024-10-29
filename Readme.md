@@ -5,7 +5,7 @@ Welcome to the **Data Profiler Dashboard**! This Streamlit-based application ena
 
 Try my EDA app: https://profiledata.streamlit.app/
 
-![An overview of the EDA Webapp:](./Screenshot.png)
+![An overview of the EDA Webapp:](./screenshot.png)
 
 ## Features
 
