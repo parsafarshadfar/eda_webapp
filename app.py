@@ -116,7 +116,7 @@ if 'n_quantiles' not in st.session_state:
 
 if binning_method == "Equal-width Bins":
     st.session_state['n_quantiles'] = None
-    n_bins_input = st.sidebar.text_input("Number of equal-width bins (integer)", value="5")
+    n_bins_input = st.sidebar.text_input("Number of equal-width bins (integer)", value="8")
     try:
         st.session_state['n_bins'] = int(n_bins_input)
     except ValueError:
@@ -124,7 +124,7 @@ if binning_method == "Equal-width Bins":
         st.session_state['n_bins'] = None
 elif binning_method == "Quantile Bins":
     st.session_state['n_bins'] = None
-    n_quantiles_input = st.sidebar.text_input("Number of quantile bins (integer)", value="5")
+    n_quantiles_input = st.sidebar.text_input("Number of quantile bins (integer)", value="8")
     try:
         st.session_state['n_quantiles'] = int(n_quantiles_input)
     except ValueError:
