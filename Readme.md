@@ -61,7 +61,9 @@ python3 -m streamlit run app.py
 - `matplotlib==3.9.2`
 - `seaborn==0.13.2`
 - `plotly==5.24.1`
+- `scipy==1.14.1`
 - `openpyxl==3.1.5`
+
 
 
 ## Usage in Industry
