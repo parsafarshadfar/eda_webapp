@@ -83,7 +83,7 @@ if dataset_option == "Upload Your Own Data":
         st.stop()
 elif dataset_option == "California Housing Dataset as an Example":
     # Load the breast cancer dataset
-    st.session_state['data'] = pd.read_csv(r'''Examples\Data\HousingData_TrainData.csv''')
+    st.session_state['data'] = pd.read_csv(r'''Examples/Data/HousingData_TrainData.csv''')
     st.success("Example dataset loaded successfully!")
 
 # Display the dataset
