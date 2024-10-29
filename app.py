@@ -143,7 +143,7 @@ include_plot_outliers = st.sidebar.checkbox("Include Box Plots", value=True)
 correlation_methods = st.sidebar.multiselect(
     "Correlation Methods", ["Pearson", "Spearman", 'Kendall'], default=["Kendall"]
 )
-st.session_state['top_corr_thr'] = st.sidebar.text_input("Correlation Threshold", value=0.7)
+st.session_state['top_corr_thr'] = st.sidebar.text_input("Correlation Threshold", value=0.65)
 
 # Run the profiler
 if st.sidebar.button("Run Profiling"):
@@ -236,7 +236,7 @@ if st.sidebar.button("Run Profiling"):
                 st.write(f"**{method} Correlation Matrix**")
                 # Define a function to highlight cells based on the threshold
                 def highlight_corr(val):
-                    color = 'yellow' if abs(val) > float(st.session_state.get('top_corr_thr', 0.7)) else ''
+                    color = 'yellow' if abs(val) > float(st.session_state.get('top_corr_thr', 0.65)) else ''
                     return f'background-color: {color}'
 
                 # Apply the styling to the correlation matrix
