@@ -245,42 +245,42 @@ if st.sidebar.button("Run Profiling"):
                 
         st.divider()
         # Histograms
-
+        
         # Define colors
         colors = ['blue', 'green', 'red', 'purple', 'orange', 'brown', 'pink', 'gray', 'olive', 'cyan']
-
+        
         if include_plot_hist:
             st.subheader("Histograms")
             for idx, feat in enumerate(selected_features):
-                color = colors[idx % len(colors)]  ### Cycle through colors for features
-
+                color = colors[idx % len(colors)]  # Cycle through colors for features
+        
                 if st.session_state['data'][selected_features][feat].dtype in [np.float64, np.float32, np.int64, np.int32]:
                     if binning_method == "Equal-width Bins" and st.session_state.get('n_bins', None) is not None:
-                        ###mthod 1 # Use the specified number of bins #somehow this is not working accuartely and shows less number of bins
-                        # fig = px.histogram(st.session_state['data'][selected_features], x=feat, nbins=st.session_state.get('n_bins', None))
-
-                        ###method 2
                         # Use the specified number of bins by setting xbins
                         data_min = st.session_state['data'][selected_features][feat].min()
                         data_max = st.session_state['data'][selected_features][feat].max()
                         n_bins = st.session_state.get('n_bins', 10)  # Default to 10 bins if not specified
-
+        
                         # Slightly adjust the data range to include all data points
-                        data_range = data_max - data_min
-                        bin_size = data_range / n_bins
-                        data_min_adjusted = data_min - (data_range * 0.001)  # Subtract 0.1% of the range
-                        data_max_adjusted = data_max + (data_range * 0.001)  # Add 0.1% of the range
-
+                        epsilon = (data_max - data_min) * 0.001  # Small value to adjust the range
+                        data_min_adjusted = data_min - epsilon
+                        data_max_adjusted = data_max + epsilon
+        
+                        # Recalculate the bin size based on the adjusted data range
+                        data_range_adjusted = data_max_adjusted - data_min_adjusted
+                        bin_size = data_range_adjusted / n_bins
+        
                         fig = px.histogram(st.session_state['data'][selected_features], x=feat)
-
+        
                         fig.update_traces(
                             xbins=dict(
                                 start=data_min_adjusted,
                                 end=data_max_adjusted,
                                 size=bin_size
                             ),
-                            marker_color=color)
-
+                            marker_color=color
+                        )
+        
                         fig.update_layout(
                             xaxis_title=feat,
                             yaxis_title='Count',
