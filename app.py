@@ -13,9 +13,6 @@ import time
 import zipfile
 from io import BytesIO
 
-#GithubIcon {
-  visibility: hidden;
-}
 
 # Configure the page
 st.set_page_config(
