@@ -3,7 +3,7 @@
 
 Welcome to the **Data Profiler Dashboard**! This Streamlit-based application enables comprehensive data profiling and analysis, making it easy to understand your dataset's structure, quality, and statistics.
 
-Try my EDA app: https://profiledata.streamlit.app/
+Try my EDA app: https://profiledata.streamlit.app/ 
 
 ![An overview of the EDA Webapp:](./screenshot.png)
 
