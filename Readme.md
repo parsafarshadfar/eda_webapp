@@ -28,7 +28,7 @@ Try my EDA app: https://profiledata.streamlit.app/
 
 ## Installation
 
-Clone the repository and navigate to the project directory:
+Clone the repository and navigate to the project directory: 
 
 ```bash
 git clone https://github.com/parsafarshadfar/eda_webapp.git
