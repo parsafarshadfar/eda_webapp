@@ -77,7 +77,7 @@ Data profiling is essential across industries to:
 Explore your data with ease and gain valuable insights with the **Data Profiler Dashboard**!
 
 ## Notes on Hardware Configuration and Jupyter Notebook Support
-
+ 
 Due to low hardware configuration, some features like the **groupby** functionality are not available in this web app. For full functionality, including groupby operations, use the Jupyter Notebook provided in the example directory.
 
 The Jupyter Notebook also supports **Spark SQL DataFrame** and **PySpark Pandas DataFrames**, and it has been successfully tested in Databricks.
