@@ -33,7 +33,7 @@ Clone the repository and navigate to the project directory:
 ```bash
 git clone https://github.com/parsafarshadfar/eda_webapp.git
 cd eda_webapp
-```
+``` 
 
 Install the required packages:
 
