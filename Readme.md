@@ -58,7 +58,7 @@ python3 -m streamlit run app.py
 - `streamlit==1.39.0`
 - `pandas==2.2.3`
 - `numpy==2.1.2`
-- `matplotlib==3.9.2`
+- `matplotlib==3.9.2` 
 - `seaborn==0.13.2`
 - `plotly==5.24.1`
 - `scipy==1.14.1`
