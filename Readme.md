@@ -41,7 +41,7 @@ Install the required packages:
 pip install -r requirements.txt
 ```
 
-## Run the Application
+## Run the Application 
 
 Launch the Streamlit app with:
 
