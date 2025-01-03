@@ -17,7 +17,7 @@ Try my EDA app: https://profiledata.streamlit.app/
 
 ## How to Use
 
-1. **Upload Your Data**:
+1. **Upload Your Data**: 
    - Use the sidebar to upload your CSV file or load the example California Housing dataset.
 2. **Select Features**:
    - Choose specific columns for analysis.
