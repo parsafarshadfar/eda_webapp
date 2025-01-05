@@ -66,7 +66,7 @@ python3 -m streamlit run app.py
 
 
 
-## Usage in Industry
+## Usage in Industry 
 
 Data profiling is essential across industries to:
 - Detect data quality issues. 
