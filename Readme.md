@@ -10,7 +10,7 @@ Try my EDA app: https://profiledata.streamlit.app/
 ## Features
 
 - **Descriptive Statistics**: Summary statistics for each feature.
-- **Missing Value Analysis**: Shows counts and percentages of missing values.
+- **Missing Value Analysis**: Shows counts and percentages of missing values. 
 - **Correlation Analysis**: Pearson, Spearman, and Kendall correlation matrices.
 - **Histograms**: Visualize data distributions with customizable binning options.
 - **Box Plots**: Identify outliers and visualize feature distributions. 
