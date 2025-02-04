@@ -49,7 +49,7 @@ Launch the Streamlit app with:
 streamlit run app.py
  
 or 
-
+ 
 python3 -m streamlit run app.py
 ```
 
