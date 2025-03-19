@@ -190,7 +190,7 @@ def describe_data(data, numeric_only=True, round_columns=None, drop_columns=None
             freq_of_most_frequent_value_each_column.append(np.nan)
 
         else:
-            unique_values_this_column = (data[feat].iloc[:10].value_counts(normalize=True, dropna=False) * 100)
+            unique_values_this_column = (data[feat].value_counts(normalize=True, dropna=False) * 100)
             most_frequent_value_each_column.append(unique_values_this_column.index.to_numpy()[0])
             freq_of_most_frequent_value_each_column.append(unique_values_this_column.iloc[0])
     result['1st Most Freq'] = most_frequent_value_each_column
