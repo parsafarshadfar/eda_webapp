@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from profiling import __version__ as engine_version
 from profiling import plots
 from profiling.dataio import LoadedData, load_table
 from profiling.pipeline import ProfilingResult, ProfilingSettings, run_profiling
@@ -69,6 +70,21 @@ def chart(figure, key: str | None = None) -> None:
 def table(frame, **kwargs) -> None:
     """Render a dataframe at full container width."""
     st.dataframe(frame, **_TABLE_WIDTH, **kwargs)
+
+
+def render_footer() -> None:
+    """Page footer.
+
+    Called on every exit path, including the early ``st.stop()`` branches, so
+    the credit is present whether or not a dataset has been analysed yet.
+    """
+    st.divider()
+    left, right = st.columns([3, 2])
+    left.caption("**Data Profiler Dashboard** · developed by Parsa Farshadfar")
+    right.caption(
+        f"profiling engine v{engine_version} · "
+        f"pandas {pd.__version__} · numpy {np.__version__} · streamlit {st.__version__}"
+    )
 
 
 st.markdown(
@@ -206,8 +222,12 @@ def analysis_controls(loaded: LoadedData) -> ProfilingSettings:
 
     with st.sidebar.expander("Performance", expanded=False):
         st.caption(
-            "Kendall's tau is exact but costs O(n log n) per feature pair. On very large files a "
-            "seeded subsample keeps it usable; the sample size and seed are recorded in the report."
+            "Correlation is the step whose cost grows fastest with row count. Pearson and "
+            "Spearman reduce to a single matrix product, but Kendall's tau needs an O(n log n) "
+            "pass for every feature pair, so it dominates on large files. Subsampling applies to "
+            "**every** selected method, and all of them are computed from the same sampled rows, "
+            "so the methods stay comparable. The draw is seeded, and the sample size and seed are "
+            "recorded in the report."
         )
         limit_rows = st.checkbox("Subsample rows for correlation", value=False)
         max_rows = None
@@ -619,9 +639,13 @@ with st.expander("How to use this dashboard"):
         ---
 
         **A note on the statistics.** Correlations use pairwise-complete observations, matching
-        `pandas.DataFrame.corr`. Quantiles use linear interpolation. Outlier fences are the
-        standard 1.5 x IQR rule. A constant feature has an undefined correlation and is reported
-        blank rather than zero. Every definition is repeated on the methodology page of the export.
+        `pandas.DataFrame.corr`. Quantiles are interpolated linearly between the two order
+        statistics that bracket them, the same convention as `numpy.quantile` and
+        `pandas.Series.quantile`. Outlier fences follow the standard rule: a value is an outlier
+        once it lies further than 1.5 times the interquartile range (IQR, the distance from the
+        first to the third quartile) beyond the nearer quartile. A constant feature has an
+        undefined correlation and is reported blank rather than zero. Every definition is
+        repeated on the methodology page of the export.
         """
     )
 
@@ -629,6 +653,7 @@ loaded = dataset_controls()
 
 if loaded is None:
     st.info("Upload a file or choose an example dataset in the sidebar to begin.", icon="👈")
+    render_footer()
     st.stop()
 
 settings = analysis_controls(loaded)
@@ -648,6 +673,7 @@ with st.expander("Preview the raw data"):
 
 if not settings.selected_features:
     st.warning("Select at least one column in the sidebar.", icon="⚠️")
+    render_footer()
     st.stop()
 
 key = settings_key(settings, loaded.token)
@@ -665,6 +691,7 @@ if run:
 active = st.session_state.get("active_run")
 if active is None:
     st.info("Press **Run profiling** to analyse the current selection.", icon="▶️")
+    render_footer()
     st.stop()
 
 active_key, active_settings = active
@@ -713,3 +740,5 @@ st.divider()
 for index, (label, render) in enumerate(sections, start=1):
     with st.expander(f"{index}. {label}", expanded=True):
         render()
+
+render_footer()

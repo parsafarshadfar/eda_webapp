@@ -1,8 +1,13 @@
 [server]
 maxUploadSize = 2048
 maxMessageSize = 2048
-enableCORS=false
-enableXsrfProtection=false
+# XSRF protection is left enabled. Disabling it lets a third-party page post
+# to the app on a visitor's behalf, which is not an acceptable trade for a
+# publicly reachable deployment.
+enableXsrfProtection = true
 
 [theme]
-base="light"
+base = "light"
+
+[browser]
+gatherUsageStats = false

@@ -1,10 +1,26 @@
-streamlit==1.39.0
-pandas==2.2.3
-numpy==2.1.2
-matplotlib==3.9.2
-seaborn==0.13.2
-plotly==5.24.1
-scipy==1.14.1
-jupyter==1.1.1
+# Runtime dependencies for the Data Profiler Dashboard.
+#
+# Requires Python 3.12 or 3.13. On Streamlit Community Cloud the interpreter is
+# chosen under Advanced settings when the app is deployed; SciPy 1.18 does not
+# publish wheels for Python 3.11 or older.
+#
+# Versions are pinned exactly so a profiling report can be reproduced later,
+# which matters when the output is used as evidence. The application code is
+# also tested against the older set listed at the bottom of this file.
+
+streamlit==1.60.0
+pandas==3.0.5
+numpy==2.5.1
+scipy==1.18.0
+matplotlib==3.11.1
+plotly==6.9.0
 openpyxl==3.1.5
 
+# Streamlit already depends on PyArrow; it is pinned here because the CSV
+# loader prefers PyArrow's multi-threaded parser. Streamlit 1.60 requires <25.
+pyarrow==24.0.0
+
+# Tested and supported alternative for Python 3.12 deployments that cannot move
+# to the versions above:
+#   streamlit==1.37.1  pandas==2.2.2  numpy==1.26.4  scipy==1.13.1
+#   matplotlib==3.9.2  plotly==5.24.1 openpyxl==3.1.5

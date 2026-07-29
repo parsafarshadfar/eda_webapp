@@ -70,7 +70,9 @@ _METHODOLOGY = [
         "average ranks; Kendall is the tau-b coefficient with tie correction. Pairs are formed "
         "from rows where both features are present (pairwise-complete observations), matching "
         "pandas.DataFrame.corr. Constant features yield an undefined coefficient and are left "
-        "blank rather than reported as zero.",
+        "blank rather than reported as zero. When row subsampling is enabled it applies to every "
+        "method, all of which are computed from the same seeded sample, so the coefficients stay "
+        "directly comparable; the sample size and seed are stated on the cover page.",
     ),
     (
         "Distributions",
@@ -81,10 +83,12 @@ _METHODOLOGY = [
     ),
     (
         "Outliers",
-        "Boxes span Q1 to Q3 with the median marked and the mean shown as a diamond. Whiskers "
-        "extend to the most extreme observation within 1.5 x IQR of the quartiles; anything "
-        "beyond is plotted as an outlier point. Outlier counts are exact; when a feature has more "
-        "outliers than can be drawn legibly, an evenly spaced subset is plotted and the page says so.",
+        "Boxes span the first quartile (Q1) to the third quartile (Q3), with the median marked "
+        "and the mean shown as a diamond. The interquartile range (IQR) is the distance from Q1 "
+        "to Q3. Whiskers extend to the most extreme observation still within 1.5 x IQR of the "
+        "nearer quartile; anything beyond that is plotted as an outlier point. Outlier counts are "
+        "exact; when a feature has more outliers than can be drawn legibly, an evenly spaced "
+        "subset is plotted and the page says so.",
     ),
 ]
 
