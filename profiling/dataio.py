@@ -7,6 +7,12 @@ Two things matter here for large files:
 * the resulting dtypes -- only *lossless* conversions are applied, so the
   numbers used by every downstream analysis are bit-for-bit the values that
   were present in the file.
+
+The second half of the module is reshaping rather than loading: stacking several
+frames into one tagged frame (:func:`combine_datasets`) and collapsing one-hot
+encoded columns back into single categorical ones
+(:func:`merge_one_hot_encoded_columns`). Both are preparation steps that belong
+before a profiling run rather than inside it.
 """
 
 from __future__ import annotations
@@ -16,13 +22,16 @@ import hashlib
 import io
 import os
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
+from . import _spark
+
 __all__ = [
     "LoadedData",
+    "CombinedData",
     "load_table",
     "optimize_memory",
     "memory_usage_mb",
@@ -30,7 +39,13 @@ __all__ = [
     "is_numeric_series",
     "is_categorical_series",
     "numeric_columns",
+    "to_pandas",
+    "combine_datasets",
+    "merge_one_hot_encoded_columns",
 ]
+
+#: Default name of the column that records which input frame a row came from.
+DEFAULT_TAG_COLUMN = "Dataset"
 
 # A string column is only converted to ``category`` when it repeats enough to
 # actually save memory, and only when the category index stays small.
@@ -288,3 +303,191 @@ def dtype_summary(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
         {"dtype": counts.index.to_numpy(), "n_columns": counts.to_numpy(dtype=np.int64)}
     ).reset_index(drop=True)
+
+
+def to_pandas(data: Any) -> Any:
+    """Materialise a Spark frame as pandas; return anything else unchanged.
+
+    Safe to call on a plain DataFrame, so a function that may receive either can
+    normalise its input in one line without importing anything Spark-related.
+    """
+    return _spark.to_pandas(data)
+
+
+# --------------------------------------------------------------------------- #
+# combining several frames into one
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CombinedData:
+    """Several frames stacked into one, with a column recording their origin."""
+
+    frame: Any
+    feature_names: list[str]
+    tag_column: str | None
+    sources: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def is_combined(self) -> bool:
+        """False when a single frame was passed through untouched."""
+        return self.tag_column is not None
+
+    @property
+    def features(self) -> Any:
+        """The frame restricted to the feature columns, i.e. without the tag."""
+        return self.frame[self.feature_names]
+
+
+def combine_datasets(
+    data: Any,
+    tag_column: str = DEFAULT_TAG_COLUMN,
+) -> CombinedData:
+    """Stack a mapping of frames into one frame tagged by key.
+
+    ``{"Train": train, "Test": test}`` becomes a single frame with an extra
+    column -- ``Dataset`` by default -- holding ``"Train"`` or ``"Test"``. That
+    column is excluded from ``feature_names``, so the analyses never profile the
+    tag itself, and it is exactly what :func:`profiling.grouping.make_grouping`
+    then groups on to compare the two.
+
+    A frame passed in on its own is returned untouched, with ``tag_column`` set
+    to ``None``. That means a caller can always route its input through this
+    function without special-casing the single-frame case.
+
+    Parameters
+    ----------
+    data
+        A DataFrame, or a mapping of name to DataFrame. pandas and Spark frames
+        are both accepted; mixing the two in one mapping is not.
+    tag_column
+        Name of the column that records the origin of each row. It must not
+        collide with an existing column.
+    """
+    if not isinstance(data, Mapping):
+        return CombinedData(
+            frame=data,
+            feature_names=[str(column) for column in data.columns],
+            tag_column=None,
+            sources={},
+        )
+
+    if not data:
+        raise ValueError("combine_datasets() was given an empty mapping of frames.")
+
+    frames = {str(key): value for key, value in data.items()}
+    for key, frame in frames.items():
+        if tag_column in list(frame.columns):
+            raise ValueError(
+                f"Frame {key!r} already has a column named {tag_column!r}; "
+                "pass a different tag_column."
+            )
+
+    first = next(iter(frames.values()))
+    if _spark.is_spark(first):
+        combined = _spark.spark_concat(frames, tag_column)
+    else:
+        combined = pd.concat(list(frames.values()), ignore_index=True)
+        combined[tag_column] = np.repeat(
+            list(frames.keys()), [int(frame.shape[0]) for frame in frames.values()]
+        )
+
+    feature_names = [str(column) for column in combined.columns if str(column) != tag_column]
+    return CombinedData(
+        frame=combined,
+        feature_names=feature_names,
+        tag_column=tag_column,
+        sources={key: int(frame.shape[0]) for key, frame in frames.items()},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# one-hot encoding
+# --------------------------------------------------------------------------- #
+def _infer_dummy_groups(columns: Sequence[str], separator: str) -> dict[str, list[str]]:
+    """Group ``Colour_red``/``Colour_blue`` under ``Colour`` using the separator."""
+    groups: dict[str, list[str]] = {}
+    for column in columns:
+        text = str(column)
+        position = text.rfind(separator)
+        if position > 0:
+            groups.setdefault(text[:position], []).append(column)
+    return groups
+
+
+def _dummy_groups_by_prefix(columns: Sequence[str], features: Iterable[str]) -> dict[str, list[str]]:
+    """Group by explicit original feature names, matched as a substring."""
+    return {
+        str(feature): [column for column in columns if str(feature) in str(column)]
+        for feature in features
+    }
+
+
+def merge_one_hot_encoded_columns(
+    data: pd.DataFrame,
+    features: Mapping[str, Sequence[str]] | Iterable[str] | str = "auto",
+    separator: str = "__",
+    *,
+    strip_prefix: bool = False,
+) -> pd.DataFrame:
+    """Collapse one-hot-encoded columns back into single categorical columns.
+
+    Profiling a wide block of 0/1 dummies says very little; profiling the one
+    categorical column they encode says a lot. Each group of dummies is replaced,
+    in the position of its first member, by one column holding the name of the
+    winning dummy for that row.
+
+    Parameters
+    ----------
+    data
+        Input frame. It is not modified; a new frame is returned.
+    features
+        ``"auto"`` infers the groups from ``separator``. A list of original
+        feature names groups by substring match on the column names. A mapping
+        of ``{original: [dummy, ...]}`` states the groups explicitly.
+    separator
+        Separator used in the dummy names. Only consulted for ``"auto"``.
+    strip_prefix
+        Drop the ``"<feature><separator>"`` prefix from the merged values, so
+        ``Colour__red`` becomes ``red``. Off by default, which keeps the full
+        dummy name.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy with each dummy group replaced by a single column.
+
+    Notes
+    -----
+    The winner of a row is its largest dummy, so a row in which every dummy is
+    zero is attributed to the first column of the group rather than reported as
+    unknown. Rows where the whole group is null stay null.
+    """
+    if isinstance(features, Mapping):
+        groups = {str(key): list(value) for key, value in features.items()}
+    elif isinstance(features, str):
+        if features.lower() != "auto":
+            raise ValueError(
+                f"features must be 'auto', a list of feature names or a mapping; got {features!r}."
+            )
+        groups = _infer_dummy_groups(list(data.columns), separator)
+    else:
+        groups = _dummy_groups_by_prefix(list(data.columns), features)
+
+    merged = data
+    for feature, dummies in groups.items():
+        present = [column for column in dummies if column in merged.columns]
+        if len(present) < 2:
+            continue
+
+        position = merged.columns.get_loc(present[0])
+        winner = merged[present].idxmax(axis=1, skipna=True)
+        if strip_prefix:
+            prefix = f"{feature}{separator}"
+            winner = winner.map(
+                lambda value, p=prefix: value[len(p) :]
+                if isinstance(value, str) and value.startswith(p)
+                else value
+            )
+        merged = merged.drop(present, axis=1)
+        merged.insert(position, feature, winner)
+
+    return merged if merged is not data else data.copy()

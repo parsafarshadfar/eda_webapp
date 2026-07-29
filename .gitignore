@@ -19,7 +19,7 @@ dist/
 .coverage
 htmlcov/
 
-# Profiling output written by DataProfiler
+# Profiling output written by write_report_dir / write_segmented_report_dir
 Results_of_DataProfiling/
 
 # Notebook checkpoints

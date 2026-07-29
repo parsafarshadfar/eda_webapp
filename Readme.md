@@ -30,10 +30,18 @@ with a record of the exact settings and library versions that produced it.
 - **ZIP archive** — numbered folders containing the CSV behind every chart, an Excel workbook
   of the correlations, PNG charts, the PDF, and a machine-readable `metadata.json` carrying the
   dataset fingerprint, settings, step timings and versions.
+- **Folder** — the same bundle written straight to disk instead of into an archive, for a
+  notebook or a batch job. The ZIP and the folder share one definition of their contents, so an
+  unpacked archive and a written folder are the same tree.
 
 The interactive charts in the browser are Plotly; the exported charts are Matplotlib. Both are
 rendered from the *same* pre-aggregated summaries, so an exported page can never disagree with
 what was shown on screen.
+
+**Beyond the dashboard** — the engine is a plain Python package with no Streamlit import, so a
+notebook or script gets everything above plus **segmentation** (profile each segment of a dataset
+separately, by value, interval, equal-width bin or quantile), **dataset comparison** and
+**one-hot-encoding collapse**. See [Using the package directly](#using-the-package-directly).
 
 ---
 
@@ -76,21 +84,31 @@ python -m streamlit run app.py
 
 ```
 app.py                     Streamlit user interface
-profiling/                 analysis engine
-├── dataio.py              loading, delimiter detection, lossless memory tuning
+profiling/                 analysis engine — the whole toolkit
+├── dataio.py              loading, delimiter detection, lossless memory tuning,
+│                          stacking frames, collapsing one-hot encodings
 ├── stats.py               descriptive statistics, missing values, correlation
 ├── summaries.py           pre-aggregated distribution and outlier summaries
+├── grouping.py            splitting a dataset into segments
 ├── plots.py               interactive Plotly figures
 ├── static.py              static Matplotlib figures
-├── pipeline.py            orchestration and the result object
-└── report.py              PDF and ZIP export
-DataProfiler.py            grouped/segmented profiling driver (scripting API)
-DataProfiling_utils.py     helper functions (scripting API)
+├── pipeline.py            orchestration — one run, or one run per segment
+├── report.py              PDF, ZIP and folder export
+└── _spark.py              optional Spark bridge (no Spark dependency)
 Examples/Data/             sample datasets
+Examples/Profiling_walkthrough.ipynb
+                           annotated notebook covering every feature
+DataProfiler.py            superseded — see "Using the package directly" below
+DataProfiling_utils.py     superseded
 ```
 
-`DataProfiler.py` and `DataProfiling_utils.py` keep their original public signatures for use
-from scripts and notebooks; internally they delegate to the `profiling` package.
+`profiling` is the single source of truth. It has no Streamlit import anywhere, so everything the
+dashboard can do is also available from a notebook, a script or a Databricks job — and so is a
+good deal it does not expose, chiefly segmentation.
+
+`DataProfiler.py` and `DataProfiling_utils.py` are the original scripting modules. Every feature
+they had now lives in the package, so they are kept only so existing scripts keep importing; new
+code should not use them.
 
 ---
 
@@ -130,27 +148,78 @@ categories. Floating-point precision is never reduced.
 
 ---
 
-## Beyond the web app
+## Using the package directly
 
-`DataProfiler.py` exposes capabilities the dashboard does not, chiefly **groupby**
-segmentation, which profiles each segment of a dataset separately and writes one folder of
-results per segment:
+The dashboard is one front end onto `profiling`; a notebook or a script is another. Import the
+package and the whole engine is available:
 
 ```python
-from DataProfiler import DataProfiler
+import profiling
 
-profiler = DataProfiler(save_folder_name="Results_of_DataProfiling")
-profiler.perform_data_analysis(
-    df,
-    groupby="Age",          # or bins=[(1, 20), (20, 50)] / n_bins=4 / n_quantiles=4
-    correlation_methods=("Pearson", "Spearman"),
-    top_corr_thr=0.7,
-)
+loaded = profiling.load_table("data.csv")
+settings = profiling.ProfilingSettings(correlation_methods=("pearson", "spearman"))
+
+result = profiling.run_profiling(loaded.frame, settings, dataset_name="data.csv")
+profiling.write_report_dir(result, "Results_of_DataProfiling")   # or build_pdf / build_zip
 ```
 
-It also accepts a dict of frames (`{"Train": train_df, "Test": test_df}`) to profile several
-datasets side by side, and supports **Spark SQL** and **PySpark pandas** DataFrames when run
-inside a Databricks runtime.
+Importing `profiling` costs pandas and NumPy only — Matplotlib and Plotly load on first use, so a
+numbers-only script does not pay for them.
+
+**[`Examples/Profiling_walkthrough.ipynb`](Examples/Profiling_walkthrough.ipynb)** is an annotated,
+runnable tour of every feature: loading and provenance, each analysis on its own, both figure
+back ends, the one-call pipeline, all three export shapes, and everything below.
+
+### Segmentation
+
+The main capability the dashboard does not expose. A dataset is split into segments and every
+analysis is run per segment, with identical settings so the numbers stay comparable:
+
+```python
+segmented = profiling.run_segmented_profiling(
+    df,
+    settings,
+    by="Age",              # column name, Series, or array
+    n_quantiles=4,         # or bins=[(1, 20), (20, 50)] / n_bins=4 / nothing, for distinct values
+)
+
+segmented.segment_overview()               # rows, features and time per segment
+segmented.describe_comparison()            # long format, one 'segment' column in front
+segmented.correlation_comparison("pearson")  # one row per pair, one column per segment
+segmented["(20.0, 35.0]"]                  # a plain ProfilingResult, exportable on its own
+
+profiling.write_segmented_report_dir(segmented, "Results_of_DataProfiling")
+```
+
+`profiling.make_grouping(...)` builds the split on its own if you only want the row indices — it
+holds no data, so it is cheap to build and reuse.
+
+### Comparing datasets
+
+`combine_datasets` stacks a mapping of frames into one, tagged by origin. Segmenting on the tag
+turns every comparison table above into a train/test drift report:
+
+```python
+both = profiling.combine_datasets({"Train": train_df, "Test": test_df})   # adds a 'Dataset' column
+
+drift = profiling.run_segmented_profiling(both.frame, settings, by="Dataset")
+drift.describe_comparison().pivot(index="feature", columns="segment", values="50%")
+```
+
+### Other preparation helpers
+
+- `merge_one_hot_encoded_columns(df)` collapses dummy blocks back into single categorical
+  columns, so the profile describes the feature rather than thirty flags.
+- `optimize_memory(df)` applies the lossless dtype conversions on a frame you loaded yourself.
+- `dataframe_figure(table)` renders any DataFrame as one table image.
+
+### Spark and Databricks
+
+The package has **no** Spark dependency and imports nothing Spark-related until a Spark object is
+actually passed in. When one is, `make_grouping` bucketises in Spark — `Bucketizer` for
+`bins`/`n_bins`, `QuantileDiscretizer` for `n_quantiles` — rather than pulling the grouping column
+onto the driver, and `run_segmented_profiling` materialises one segment at a time. **Spark SQL**
+and **PySpark pandas** frames are both accepted.
 
 ---
 

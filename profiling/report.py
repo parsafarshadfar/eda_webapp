@@ -7,23 +7,28 @@ summaries the dashboard renders interactively.
 Both bundles are self-describing. A cover page and a ``metadata.json`` record
 the dataset fingerprint, the exact settings, the library versions and the
 methodology, which is what makes an exported report usable as audit evidence.
+
+The ZIP and the folder writer share one definition of what a bundle contains,
+:func:`bundle_files`, so an unpacked archive and a directly written folder are
+byte-for-byte the same tree.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import textwrap
 import zipfile
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
-from .pipeline import ProfilingResult
+from .pipeline import ProfilingResult, SegmentedResult
 from .static import (
     A4_LANDSCAPE,
     box_figure,
@@ -41,7 +46,16 @@ from .summaries import (
     distributions_to_frame,
 )
 
-__all__ = ["build_pdf", "build_zip", "safe_filename", "suggested_basename"]
+__all__ = [
+    "build_pdf",
+    "build_zip",
+    "bundle_files",
+    "write_report_dir",
+    "write_segmented_report_dir",
+    "safe_filename",
+    "safe_dirname",
+    "suggested_basename",
+]
 
 _TEXT_COLOR = "#22303C"
 _ACCENT_COLOR = "#2F4B63"
@@ -96,10 +110,26 @@ _METHODOLOGY = [
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+#: Characters no file system will accept in a path component.
+_ILLEGAL_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
 def safe_filename(name: str, fallback: str = "feature") -> str:
     """Turn an arbitrary column name into a portable file name."""
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("._-")
     return (cleaned or fallback)[:80]
+
+
+def safe_dirname(name: str, fallback: str = "segment") -> str:
+    """Turn a segment label into a portable folder name.
+
+    Unlike :func:`safe_filename` this keeps brackets, commas and ``=``, so
+    ``Age=(10.0, 26.5]`` survives intact and the grouping stays readable in the
+    file tree. Only characters that a file system genuinely rejects are
+    replaced.
+    """
+    cleaned = _ILLEGAL_PATH_CHARS.sub("_", str(name)).strip().rstrip(".")
+    return (cleaned or fallback)[:120]
 
 
 def suggested_basename(result: ProfilingResult) -> str:
@@ -415,6 +445,125 @@ def _environment_page(result: ProfilingResult) -> Figure:
 # --------------------------------------------------------------------------- #
 # ZIP
 # --------------------------------------------------------------------------- #
+def bundle_files(
+    result: ProfilingResult,
+    *,
+    include_pdf: bool = True,
+    include_individual_charts: bool = True,
+    max_individual_charts: int = _MAX_INDIVIDUAL_CHARTS,
+    pdf_bytes: bytes | None = None,
+) -> Iterator[tuple[str, bytes]]:
+    """Yield ``(relative path, file bytes)`` for every file of the export bundle.
+
+    This is the single definition of what a bundle contains. :func:`build_zip`
+    packs the stream into an archive and :func:`write_report_dir` writes it to a
+    folder, which is why the two can never drift apart. Files are produced lazily
+    and one at a time, so neither consumer holds more than one rendered figure in
+    memory.
+    """
+    settings = result.settings
+
+    def as_csv(frame: pd.DataFrame, index: bool = True) -> bytes:
+        return frame.to_csv(index=index, lineterminator="\n").encode("utf-8")
+
+    def as_png(figure: Figure, dpi: int = 160, crop: bool = False) -> bytes:
+        return figure_to_png(figure, dpi=dpi, crop=crop)
+
+    yield "metadata.json", json.dumps(result.metadata(), indent=2, default=str).encode("utf-8")
+
+    if settings.include_describe and result.describe is not None:
+        folder = "01_descriptive_statistics"
+        yield f"{folder}/descriptive_statistics.csv", as_csv(result.describe)
+        yield (
+            f"{folder}/descriptive_statistics.png",
+            as_png(
+                table_figures(
+                    result.describe,
+                    title="Descriptive statistics",
+                    rows_per_page=max(len(result.describe), 1),
+                    show_index=True,
+                    index_label="Feature",
+                    fit_page=False,
+                )[0],
+                crop=True,
+            ),
+        )
+
+    if settings.include_missing and result.missing_all is not None:
+        folder = "02_missing_values"
+        yield f"{folder}/missing_values_all_columns.csv", as_csv(result.missing_all)
+        yield f"{folder}/missing_values_affected_columns.csv", as_csv(result.missing)
+        yield f"{folder}/missing_values.png", as_png(missing_bar_figure(result.missing, fit_page=False))
+
+    if settings.include_correlation and result.correlations:
+        folder = "03_correlation"
+        for method, matrix in result.correlations.items():
+            yield f"{folder}/correlation_matrix_{safe_filename(method)}.csv", as_csv(matrix.round(6))
+            top = result.top_correlations.get(method)
+            if top is not None:
+                yield (
+                    f"{folder}/top_correlations_{safe_filename(method)}.csv",
+                    as_csv(top.round(6), index=False),
+                )
+            yield (
+                f"{folder}/correlation_heatmap_{safe_filename(method)}.png",
+                as_png(
+                    heatmap_figure(
+                        matrix, method, threshold=settings.correlation_threshold, fit_page=False
+                    )
+                ),
+            )
+        yield f"{folder}/correlations.xlsx", _correlations_workbook(result)
+
+    if settings.include_histograms and result.distributions:
+        folder = "04_distributions"
+        yield (
+            f"{folder}/histogram_bins.csv",
+            as_csv(distributions_to_frame(result.distributions), index=False),
+        )
+        summaries = list(result.distributions.values())
+        for page, figure in enumerate(
+            histogram_grid_figures(
+                summaries, n_cols=3, n_rows=3, show_percentage=settings.show_percentage
+            ),
+            start=1,
+        ):
+            yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
+        if include_individual_charts and len(summaries) <= max_individual_charts:
+            for index, summary in enumerate(summaries):
+                yield (
+                    f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
+                    as_png(
+                        histogram_figure(
+                            summary,
+                            color=_palette_color(index),
+                            show_percentage=settings.show_percentage,
+                        )
+                    ),
+                )
+
+    if settings.include_box_plots and result.box_summaries:
+        folder = "05_outliers"
+        yield (
+            f"{folder}/box_plot_statistics.csv",
+            as_csv(box_summaries_to_frame(result.box_summaries).round(6), index=False),
+        )
+        summaries = list(result.box_summaries.values())
+        for page, figure in enumerate(box_grid_figures(summaries, n_rows=6), start=1):
+            yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
+        if include_individual_charts and len(summaries) <= max_individual_charts:
+            for index, summary in enumerate(summaries):
+                yield (
+                    f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
+                    as_png(box_figure(summary, color=_palette_color(index))),
+                )
+
+    if include_pdf:
+        yield "report.pdf", (pdf_bytes if pdf_bytes is not None else build_pdf(result))
+
+    yield "README.txt", _zip_readme(result, include_pdf=include_pdf).encode("utf-8")
+
+
 def build_zip(
     result: ProfilingResult,
     *,
@@ -430,113 +579,139 @@ def build_zip(
     """
     buffer = io.BytesIO()
     root = suggested_basename(result)
-    settings = result.settings
 
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-
-        def write_text(path: str, text: str) -> None:
-            archive.writestr(f"{root}/{path}", text)
-
-        def write_bytes(path: str, payload: bytes) -> None:
+        for path, payload in bundle_files(
+            result,
+            include_pdf=include_pdf,
+            include_individual_charts=include_individual_charts,
+            max_individual_charts=max_individual_charts,
+            pdf_bytes=pdf_bytes,
+        ):
             archive.writestr(f"{root}/{path}", payload)
 
-        def write_csv(path: str, frame: pd.DataFrame, index: bool = True) -> None:
-            write_text(path, frame.to_csv(index=index, lineterminator="\n"))
-
-        def write_png(path: str, figure: Figure, dpi: int = 160, crop: bool = False) -> None:
-            write_bytes(path, figure_to_png(figure, dpi=dpi, crop=crop))
-
-        write_text("metadata.json", json.dumps(result.metadata(), indent=2, default=str))
-
-        if settings.include_describe and result.describe is not None:
-            folder = "01_descriptive_statistics"
-            write_csv(f"{folder}/descriptive_statistics.csv", result.describe)
-            write_png(
-                f"{folder}/descriptive_statistics.png",
-                table_figures(
-                    result.describe,
-                    title="Descriptive statistics",
-                    rows_per_page=max(len(result.describe), 1),
-                    show_index=True,
-                    index_label="Feature",
-                    fit_page=False,
-                )[0],
-                crop=True,
-            )
-
-        if settings.include_missing and result.missing_all is not None:
-            folder = "02_missing_values"
-            write_csv(f"{folder}/missing_values_all_columns.csv", result.missing_all)
-            write_csv(f"{folder}/missing_values_affected_columns.csv", result.missing)
-            write_png(f"{folder}/missing_values.png", missing_bar_figure(result.missing, fit_page=False))
-
-        if settings.include_correlation and result.correlations:
-            folder = "03_correlation"
-            for method, matrix in result.correlations.items():
-                write_csv(f"{folder}/correlation_matrix_{safe_filename(method)}.csv", matrix.round(6))
-                top = result.top_correlations.get(method)
-                if top is not None:
-                    write_csv(
-                        f"{folder}/top_correlations_{safe_filename(method)}.csv",
-                        top.round(6),
-                        index=False,
-                    )
-                write_png(
-                    f"{folder}/correlation_heatmap_{safe_filename(method)}.png",
-                    heatmap_figure(
-                        matrix, method, threshold=settings.correlation_threshold, fit_page=False
-                    ),
-                )
-            write_bytes(f"{folder}/correlations.xlsx", _correlations_workbook(result))
-
-        if settings.include_histograms and result.distributions:
-            folder = "04_distributions"
-            write_csv(f"{folder}/histogram_bins.csv", distributions_to_frame(result.distributions), index=False)
-            summaries = list(result.distributions.values())
-            for page, figure in enumerate(
-                histogram_grid_figures(
-                    summaries, n_cols=3, n_rows=3, show_percentage=settings.show_percentage
-                ),
-                start=1,
-            ):
-                write_png(f"{folder}/overview_page_{page:02d}.png", figure)
-            if include_individual_charts and len(summaries) <= max_individual_charts:
-                for index, summary in enumerate(summaries):
-                    write_png(
-                        f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
-                        histogram_figure(
-                            summary,
-                            color=_palette_color(index),
-                            show_percentage=settings.show_percentage,
-                        ),
-                    )
-
-        if settings.include_box_plots and result.box_summaries:
-            folder = "05_outliers"
-            write_csv(
-                f"{folder}/box_plot_statistics.csv",
-                box_summaries_to_frame(result.box_summaries).round(6),
-                index=False,
-            )
-            summaries = list(result.box_summaries.values())
-            for page, figure in enumerate(box_grid_figures(summaries, n_rows=6), start=1):
-                write_png(f"{folder}/overview_page_{page:02d}.png", figure)
-            if include_individual_charts and len(summaries) <= max_individual_charts:
-                for index, summary in enumerate(summaries):
-                    write_png(
-                        f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
-                        box_figure(summary, color=_palette_color(index)),
-                    )
-
-        if include_pdf:
-            write_bytes(
-                "report.pdf",
-                pdf_bytes if pdf_bytes is not None else build_pdf(result),
-            )
-
-        write_text("README.txt", _zip_readme(result, include_pdf=include_pdf))
-
     return buffer.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# folder output
+# --------------------------------------------------------------------------- #
+def write_report_dir(
+    result: ProfilingResult,
+    folder: str | os.PathLike[str],
+    *,
+    include_pdf: bool = True,
+    include_individual_charts: bool = True,
+    max_individual_charts: int = _MAX_INDIVIDUAL_CHARTS,
+    pdf_bytes: bytes | None = None,
+) -> list[str]:
+    """Write the export bundle into ``folder`` as ordinary files.
+
+    Same contents and same layout as :func:`build_zip`, unpacked. This is the
+    form a notebook or a batch job wants: the numbers land on disk next to the
+    script that produced them instead of inside an archive.
+
+    Existing files of the same name are overwritten; anything else already in the
+    folder is left alone.
+
+    Returns
+    -------
+    list of str
+        Absolute paths of the files written, in the order they were written.
+    """
+    root = os.fspath(folder)
+    written: list[str] = []
+    for path, payload in bundle_files(
+        result,
+        include_pdf=include_pdf,
+        include_individual_charts=include_individual_charts,
+        max_individual_charts=max_individual_charts,
+        pdf_bytes=pdf_bytes,
+    ):
+        target = os.path.join(root, *path.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as handle:
+            handle.write(payload)
+        written.append(os.path.abspath(target))
+    return written
+
+
+def write_segmented_report_dir(
+    segmented: SegmentedResult,
+    folder: str | os.PathLike[str],
+    *,
+    include_pdf: bool = True,
+    include_individual_charts: bool = True,
+    max_individual_charts: int = _MAX_INDIVIDUAL_CHARTS,
+    comparison_folder: str = "00_comparison",
+) -> dict[str, list[str]]:
+    """Write one bundle folder per segment, plus the cross-segment comparisons.
+
+    The layout mirrors the segment labels, so the grouping is visible from the
+    file tree alone::
+
+        <folder>/00_comparison/          the tables that span every segment
+        <folder>/Age=(10.0, 26.5]/       one full bundle for that segment
+        <folder>/Age=(26.5, 43.0]/       ...
+
+    Returns
+    -------
+    dict
+        ``{segment key or "00_comparison": [paths written]}``.
+    """
+    root = os.fspath(folder)
+    written: dict[str, list[str]] = {}
+
+    comparison_root = os.path.join(root, safe_dirname(comparison_folder))
+    os.makedirs(comparison_root, exist_ok=True)
+    comparison_paths: list[str] = []
+
+    def write_comparison(name: str, payload: bytes) -> None:
+        target = os.path.join(comparison_root, name)
+        with open(target, "wb") as handle:
+            handle.write(payload)
+        comparison_paths.append(os.path.abspath(target))
+
+    write_comparison(
+        "metadata.json", json.dumps(segmented.metadata(), indent=2, default=str).encode("utf-8")
+    )
+    write_comparison("segments.csv", _csv_bytes(segmented.grouping.to_frame(), index=False))
+    write_comparison("segment_overview.csv", _csv_bytes(segmented.segment_overview(), index=False))
+
+    for name, table in (
+        ("descriptive_statistics.csv", segmented.describe_comparison()),
+        ("missing_values.csv", segmented.missing_comparison()),
+        ("box_plot_statistics.csv", segmented.box_comparison()),
+        ("histogram_bins.csv", segmented.distribution_comparison()),
+        ("top_correlations.csv", segmented.top_correlation_comparison()),
+    ):
+        if table is not None and not table.empty:
+            write_comparison(name, _csv_bytes(table, index=False))
+
+    for method in segmented.settings.correlation_methods:
+        table = segmented.correlation_comparison(method)
+        if not table.empty:
+            write_comparison(
+                f"correlation_by_segment_{safe_filename(method)}.csv", _csv_bytes(table, index=False)
+            )
+
+    written[comparison_folder] = comparison_paths
+
+    for key, result in segmented.items():
+        label = segmented.grouping[key].label if segmented.grouping.is_grouped else key
+        written[key] = write_report_dir(
+            result,
+            os.path.join(root, safe_dirname(label)),
+            include_pdf=include_pdf,
+            include_individual_charts=include_individual_charts,
+            max_individual_charts=max_individual_charts,
+        )
+
+    return written
+
+
+def _csv_bytes(frame: pd.DataFrame, index: bool = True) -> bytes:
+    return frame.to_csv(index=index, lineterminator="\n").encode("utf-8")
 
 
 def _palette_color(index: int) -> str:

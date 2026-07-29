@@ -48,6 +48,7 @@ __all__ = [
     "save_figure",
     "save_table_png",
     "table_figures",
+    "dataframe_figure",
     "heatmap_figure",
     "missing_bar_figure",
     "histogram_figure",
@@ -151,6 +152,49 @@ def save_table_png(frame: pd.DataFrame, path: str, title: str | None = None, dpi
     figures = table_figures(frame, title=title, rows_per_page=len(frame) or 1, fit_page=False)
     if figures:
         save_figure(figures[0], path, dpi=dpi)
+
+
+def dataframe_figure(
+    frame: pd.DataFrame,
+    *,
+    title: str | None = None,
+    decimals: int | None = 3,
+    show_index: bool = False,
+    save_as: str | None = None,
+    dpi: int = _DEFAULT_DPI,
+) -> Figure:
+    """Render any DataFrame as one table image, sized to its content.
+
+    The one-liner for putting a table into a slide or a notebook cell as a
+    picture rather than as text. Everything lands on a single page, however many
+    rows there are; use :func:`table_figures` when pagination is wanted.
+
+    Parameters
+    ----------
+    frame
+        Table to draw. An empty frame produces a figure saying so rather than
+        raising.
+    decimals
+        Rounding applied to numeric cells before rendering. ``None`` leaves the
+        values untouched.
+    save_as
+        Optional path to also write the PNG to.
+    """
+    if frame is None or frame.empty:
+        figure = _message_figure(title or "Table", "No data to display")
+    else:
+        rounded = frame.round(decimals) if decimals is not None else frame
+        figure = table_figures(
+            rounded,
+            title=title,
+            rows_per_page=max(len(rounded), 1),
+            show_index=show_index,
+            fit_page=False,
+        )[0]
+
+    if save_as is not None:
+        save_figure(figure, save_as, dpi=dpi)
+    return figure
 
 
 # --------------------------------------------------------------------------- #
