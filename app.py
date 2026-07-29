@@ -215,9 +215,9 @@ def analysis_controls(loaded: LoadedData) -> ProfilingSettings:
 
     st.sidebar.header("4 · Binning")
     binning_label = st.sidebar.radio(
-        "Method", ["Quantile", "Equal-width"], index=0, horizontal=True, label_visibility="collapsed"
+        "Method", ["Equal-width", "Quantile"], horizontal=True, label_visibility="collapsed"
     )
-    binning = QUANTILE if binning_label == "Quantile" else EQUAL_WIDTH
+    binning = EQUAL_WIDTH if binning_label == "Equal-width" else QUANTILE
     n_bins = st.sidebar.slider("Number of bins", 2, 100, 8)
     show_percentage = st.sidebar.toggle("Show distributions as percentages", value=False)
 
