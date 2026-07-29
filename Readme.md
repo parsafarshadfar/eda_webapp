@@ -106,7 +106,7 @@ The definitions below are repeated on the methodology page of every exported rep
 | **Correlation** | Pearson on raw values; Spearman as Pearson on average ranks; Kendall as tau-b with tie correction. Pairs use rows where both features are present (pairwise-complete), matching `pandas.DataFrame.corr`. A constant feature gives an undefined coefficient and is left blank rather than reported as zero. |
 | **Equal-width bins** | The observed range, padded by 0.1% at each end so the maximum falls inside the last bin, split into equal intervals. |
 | **Quantile bins** | Empirical quantiles with duplicate edges dropped; right-closed intervals with the lowest edge included. |
-| **Outliers** | A value further than 1.5 × the interquartile range (IQR, the distance from the first to the third quartile) beyond the nearer quartile. Whiskers reach the most extreme observation still inside the fences. Outlier counts are exact. |
+| **Outliers** | A value further than 1.5 × the interquartile range (IQR, the distance from the first to the third quartile) beyond the nearer quartile. Each box plot spans Q1 to Q3 and reaches the most extreme observation still inside the fences. Outlier counts are exact. |
 
 **Subsampling.** Correlation can optionally be computed on a subsample of rows. The draw is
 seeded and applies to *every* selected method, all of which are computed from the same sampled

@@ -83,12 +83,12 @@ _METHODOLOGY = [
     ),
     (
         "Outliers",
-        "Boxes span the first quartile (Q1) to the third quartile (Q3), with the median marked "
-        "and the mean shown as a diamond. The interquartile range (IQR) is the distance from Q1 "
-        "to Q3. Whiskers extend to the most extreme observation still within 1.5 x IQR of the "
-        "nearer quartile; anything beyond that is plotted as an outlier point. Outlier counts are "
-        "exact; when a feature has more outliers than can be drawn legibly, an evenly spaced "
-        "subset is plotted and the page says so.",
+        "Each box plot spans the first quartile (Q1) to the third quartile (Q3), with the median "
+        "marked and the mean shown as a diamond. The interquartile range (IQR) is the distance "
+        "from Q1 to Q3. The box plot then extends to the most extreme observation still within "
+        "1.5 x IQR of the nearer quartile; anything beyond that is plotted as an outlier point. "
+        "Outlier counts are exact; when a feature has more outliers than can be drawn legibly, an "
+        "evenly spaced subset is plotted and the page says so.",
     ),
 ]
 

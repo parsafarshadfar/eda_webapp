@@ -148,7 +148,8 @@ def dataset_controls() -> LoadedData | None:
     st.sidebar.header("1 · Dataset")
     source = st.sidebar.radio(
         "Source",
-        ("Upload a file", "Example dataset"),
+        ("Example dataset", "Upload a file"),
+        index=0,
         horizontal=True,
         label_visibility="collapsed",
     )
@@ -496,8 +497,9 @@ def distributions_section(result: ProfilingResult) -> None:
 def outliers_section(result: ProfilingResult) -> None:
     summaries = list(result.box_summaries.values())
     st.caption(
-        "Whiskers reach the most extreme observation within 1.5 x IQR of the quartiles. Outlier "
-        "counts are exact; when a feature has thousands of them an evenly spaced subset is drawn."
+        "Each box plot spans Q1 to Q3 and reaches out to the most extreme observation within "
+        "1.5 x IQR of the quartiles. Outlier counts are exact; when a feature has thousands of "
+        "them an evenly spaced subset is drawn."
     )
 
     if summaries:
