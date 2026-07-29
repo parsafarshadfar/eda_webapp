@@ -56,8 +56,7 @@ cd eda_webapp
 pip install -r requirements.txt
 ```
 
-Requires **Python 3.12 or 3.13**. To also run `Examples/Example.ipynb`, install
-`requirements-dev.txt` instead.
+Requires **Python 3.12 or 3.13**.
 
 ## Running
 
@@ -85,13 +84,13 @@ profiling/                 analysis engine
 ├── static.py              static Matplotlib figures
 ├── pipeline.py            orchestration and the result object
 └── report.py              PDF and ZIP export
-DataProfiler.py            grouped/segmented profiling driver (notebook API)
-DataProfiling_utils.py     helper functions (notebook API)
-Examples/                  sample datasets and a usage notebook
+DataProfiler.py            grouped/segmented profiling driver (scripting API)
+DataProfiling_utils.py     helper functions (scripting API)
+Examples/Data/             sample datasets
 ```
 
-`DataProfiler.py` and `DataProfiling_utils.py` keep their original public signatures and are
-what the example notebook uses; internally they delegate to the `profiling` package.
+`DataProfiler.py` and `DataProfiling_utils.py` keep their original public signatures for use
+from scripts and notebooks; internally they delegate to the `profiling` package.
 
 ---
 
@@ -131,11 +130,27 @@ categories. Floating-point precision is never reduced.
 
 ---
 
-## Notes on the notebook
+## Beyond the web app
 
-Some features are available only in `Examples/Example.ipynb` and not in the web app, chiefly
-**groupby** segmentation, which profiles each segment of a dataset separately. The notebook also
-supports **Spark SQL** and **PySpark pandas** DataFrames and has been tested on Databricks.
+`DataProfiler.py` exposes capabilities the dashboard does not, chiefly **groupby**
+segmentation, which profiles each segment of a dataset separately and writes one folder of
+results per segment:
+
+```python
+from DataProfiler import DataProfiler
+
+profiler = DataProfiler(save_folder_name="Results_of_DataProfiling")
+profiler.perform_data_analysis(
+    df,
+    groupby="Age",          # or bins=[(1, 20), (20, 50)] / n_bins=4 / n_quantiles=4
+    correlation_methods=("Pearson", "Spearman"),
+    top_corr_thr=0.7,
+)
+```
+
+It also accepts a dict of frames (`{"Train": train_df, "Test": test_df}`) to profile several
+datasets side by side, and supports **Spark SQL** and **PySpark pandas** DataFrames when run
+inside a Databricks runtime.
 
 ---
 

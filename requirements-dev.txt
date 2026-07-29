@@ -1,7 +1,0 @@
-# Extra dependencies for running Examples/Example.ipynb locally.
-# Not needed to deploy or run the web app.
-
--r requirements.txt
-
-jupyter==1.1.1
-seaborn==0.13.2
