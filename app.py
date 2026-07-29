@@ -208,7 +208,7 @@ def analysis_controls(loaded: LoadedData) -> ProfilingSettings:
     threshold = 0.65
     if include_correlation:
         chosen = st.sidebar.multiselect(
-            "Correlation methods", ["Pearson", "Spearman", "Kendall"], default=["Kendall"]
+            "Correlation methods", ["Pearson", "Spearman", "Kendall"], default=["Spearman"]
         )
         methods = tuple(method.lower() for method in chosen)
         threshold = st.sidebar.slider("Report pairs above |r|", 0.0, 1.0, 0.65, 0.01)
