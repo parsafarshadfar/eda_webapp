@@ -9,6 +9,7 @@ anything.
 
 from __future__ import annotations
 
+import html
 import inspect
 import json
 from dataclasses import asdict
@@ -69,7 +70,6 @@ def _stretch(func) -> dict:
 
 
 _CHART_WIDTH = _stretch(st.plotly_chart)
-_TABLE_WIDTH = _stretch(st.dataframe)
 _BUTTON_WIDTH = _stretch(st.download_button)
 
 
@@ -78,44 +78,71 @@ def chart(figure, key: str | None = None) -> None:
     st.plotly_chart(figure, config=PLOTLY_CONFIG, key=key, **_CHART_WIDTH)
 
 
-def table(frame, **kwargs) -> None:
-    """Render a dataframe at full container width."""
-    st.dataframe(frame, **_TABLE_WIDTH, **kwargs)
-
-
 def professional_table(
     frame: pd.DataFrame,
     *,
     formats: dict[str, object] | None = None,
+    gradient: dict[str, object] | None = None,
     height: int = 600,
+    label: str = "Data table",
+    max_columns: int = 8,
 ) -> None:
-    """Render a compact audit table with wrapped headers and safe HTML values."""
-    styled = (
-        frame.style.format(
-            formats or {},
-            na_rep="—",
-            escape="html",
-            precision=3,
+    """Render centered, responsive table groups with safe HTML content."""
+    max_columns = max(2, int(max_columns))
+    columns = list(frame.columns)
+    if len(columns) > max_columns:
+        key_column = columns[0]
+        chunk_size = max_columns - 1
+        column_groups = [
+            [key_column, *columns[start : start + chunk_size]]
+            for start in range(1, len(columns), chunk_size)
+        ]
+    else:
+        column_groups = [columns]
+
+    safe_label = html.escape(str(label), quote=True)
+    for group_number, group_columns in enumerate(column_groups, start=1):
+        group = frame.loc[:, group_columns]
+        group_formats = {
+            key: value for key, value in (formats or {}).items() if key in group.columns
+        }
+        group_label = safe_label
+        if len(column_groups) > 1:
+            group_label += f" - part {group_number} of {len(column_groups)}"
+            st.caption(group_label)
+
+        styled = (
+            group.style.format(
+                group_formats,
+                na_rep="—",
+                escape="html",
+                precision=3,
+            )
         )
-        .hide(axis="index")
-        .set_properties(**{"text-align": "right"})
-    )
-    text_columns = [
-        column
-        for column in frame.columns
-        if not pd.api.types.is_numeric_dtype(frame[column].dtype)
-    ]
-    if text_columns:
-        styled = styled.set_properties(subset=text_columns, **{"text-align": "left"})
-    styled = styled.set_table_attributes('class="profile-table"')
-    st.markdown(
-        (
-            f'<div class="profile-table-wrap" style="max-height:{int(height)}px">'
-            f"{styled.to_html()}"
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
+        if gradient:
+            numeric_columns = [
+                column
+                for column in group.columns
+                if pd.api.types.is_numeric_dtype(group[column].dtype)
+            ]
+            if numeric_columns:
+                styled = styled.background_gradient(subset=numeric_columns, **gradient)
+        styled = (
+            styled.format_index(escape="html", axis="columns")
+            .hide(axis="index")
+            .set_properties(**{"text-align": "center"})
+            .set_table_attributes(f'class="profile-table" aria-label="{group_label}"')
+        )
+        density_class = " profile-table-wrap--dense" if len(group_columns) >= 7 else ""
+        st.markdown(
+            (
+                f'<div class="profile-table-wrap{density_class}" role="region" tabindex="0" '
+                f'aria-label="{group_label}" style="max-height:{int(height)}px">'
+                f"{styled.to_html()}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
 
 
 def _compact_value(value: object) -> str:
@@ -125,6 +152,17 @@ def _compact_value(value: object) -> str:
             return "—"
         return f"{value:,.4g}"
     return str(value)
+
+
+def _available_column_label(columns, preferred: str) -> str:
+    """Return a display label that cannot collide with an existing column."""
+    existing = set(columns)
+    if preferred not in existing:
+        return preferred
+    suffix = 2
+    while f"{preferred} {suffix}" in existing:
+        suffix += 1
+    return f"{preferred} {suffix}"
 
 
 def render_footer() -> None:
@@ -152,16 +190,28 @@ st.markdown(
       .profile-table-wrap {
         border: 1px solid #D6DEE5;
         border-radius: 0.5rem;
-        overflow: auto;
+        max-width: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
         margin: 0.4rem 0 0.8rem;
+        width: 100%;
+      }
+      .profile-table-wrap:focus-visible {
+        outline: 3px solid #72B7B2;
+        outline-offset: 2px;
       }
       table.profile-table {
         border-collapse: separate;
         border-spacing: 0;
         color: #22303C;
-        font-size: 0.88rem;
-        min-width: 100%;
-        width: max-content;
+        font-size: clamp(0.70rem, 0.62rem + 0.20vw, 0.88rem);
+        max-width: 100%;
+        min-width: 0;
+        table-layout: fixed;
+        width: 100% !important;
+      }
+      .profile-table-wrap--dense table.profile-table {
+        font-size: clamp(0.62rem, 0.55rem + 0.18vw, 0.78rem);
       }
       table.profile-table th {
         background: #2F4B63;
@@ -170,18 +220,26 @@ st.markdown(
         color: white;
         font-weight: 650;
         line-height: 1.15;
-        padding: 0.65rem 0.75rem;
+        overflow-wrap: anywhere;
+        padding: clamp(0.32rem, 0.28rem + 0.25vw, 0.65rem);
         position: sticky;
         text-align: center !important;
         top: 0;
+        vertical-align: middle;
         white-space: pre-line;
+        word-break: normal;
         z-index: 2;
       }
       table.profile-table td {
         border-bottom: 1px solid #D6DEE5;
         border-right: 1px solid #D6DEE5;
-        padding: 0.5rem 0.75rem;
-        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        overflow-wrap: anywhere;
+        padding: clamp(0.28rem, 0.24rem + 0.20vw, 0.55rem);
+        text-align: center !important;
+        vertical-align: middle;
+        white-space: normal;
+        word-break: normal;
       }
       table.profile-table tbody tr:nth-child(odd) {background: #FFFFFF;}
       table.profile-table tbody tr:nth-child(even) {background: #EEF3F7;}
@@ -382,7 +440,7 @@ def overview_section(result: ProfilingResult, loaded: LoadedData) -> None:
             str(loaded.frame[column].dtype) if column in loaded.frame.columns else "-"
             for column in types["Column"]
         ]
-        table(types, hide_index=True, height=320)
+        professional_table(types, height=320, label="Column types")
 
     with right:
         st.subheader("Load details")
@@ -398,14 +456,14 @@ def overview_section(result: ProfilingResult, loaded: LoadedData) -> None:
         if loaded.optimizations and st.checkbox(
             f"Show the {len(loaded.optimizations)} lossless dtype changes", value=False
         ):
-            table(
+            professional_table(
                 pd.DataFrame(
                     {
                         "Column": list(loaded.optimizations),
                         "Change": list(loaded.optimizations.values()),
                     }
                 ),
-                hide_index=True,
+                label="Lossless dtype changes",
             )
 
         st.subheader("Step timings")
@@ -415,7 +473,11 @@ def overview_section(result: ProfilingResult, loaded: LoadedData) -> None:
                 "Seconds": [round(value, 3) for value in result.timings.values()],
             }
         )
-        table(timings, hide_index=True)
+        professional_table(
+            timings,
+            formats={"Seconds": "{:.3f}"},
+            label="Step timings",
+        )
 
 
 def describe_section(result: ProfilingResult) -> None:
@@ -450,6 +512,7 @@ def describe_section(result: ProfilingResult) -> None:
         display,
         formats={key: value for key, value in formats.items() if key in display},
         height=min(680, 60 + 35 * len(display)),
+        label="Descriptive statistics",
     )
 
 
@@ -488,6 +551,7 @@ def missing_section(result: ProfilingResult) -> None:
         display,
         formats={"Missing rows": "{:,.0f}", "Missing (%)": "{:.3f}%"},
         height=min(600, 60 + 35 * len(frame)),
+        label="Missing values by feature",
     )
 
 
@@ -522,17 +586,20 @@ def correlation_section(result: ProfilingResult) -> None:
                 top.rename(columns={value_column: display_label}),
                 formats={display_label: "{:.4f}"},
                 height=min(480, 60 + 35 * len(top)),
+                label=f"{method.capitalize()} correlations above threshold",
             )
 
         if st.checkbox("Show the full correlation matrix", value=False, key=f"matrix_{method}"):
-            if matrix.shape[0] <= 40:
-                table(
-                    matrix.style.format("{:.3f}", na_rep="-").background_gradient(
-                        cmap="RdBu_r", vmin=-1, vmax=1
-                    )
-                )
-            else:
-                table(matrix.round(4))
+            precision = 3 if matrix.shape[0] <= 40 else 4
+            index_label = _available_column_label(matrix.columns, "Feature")
+            matrix_display = matrix.rename_axis(index_label).reset_index()
+            professional_table(
+                matrix_display,
+                formats={column: f"{{:.{precision}f}}" for column in matrix.columns},
+                gradient={"cmap": "RdBu_r", "vmin": -1, "vmax": 1},
+                height=min(680, 60 + 35 * len(matrix_display)),
+                label=f"Full {method.capitalize()} correlation matrix",
+            )
 
 
 @st.fragment
@@ -779,7 +846,13 @@ with top_right:
 
 with st.expander("Preview the raw data"):
     n_preview = st.slider("Rows to preview", 5, 100, 10, key="preview_rows")
-    table(loaded.frame.head(n_preview))
+    index_label = _available_column_label(loaded.frame.columns, "Row")
+    preview = loaded.frame.head(n_preview).rename_axis(index_label).reset_index()
+    professional_table(
+        preview,
+        height=min(600, 60 + 35 * len(preview)),
+        label="Raw data preview",
+    )
 
 if not settings.selected_features:
     st.warning("Select at least one column in the sidebar.", icon="⚠️")
