@@ -98,17 +98,11 @@ profiling/                 analysis engine — the whole toolkit
 Examples/Data/             sample datasets
 Examples/Profiling_walkthrough.ipynb
                            annotated notebook covering every feature
-DataProfiler.py            superseded — see "Using the package directly" below
-DataProfiling_utils.py     superseded
 ```
 
 `profiling` is the single source of truth. It has no Streamlit import anywhere, so everything the
 dashboard can do is also available from a notebook, a script or a Databricks job — and so is a
 good deal it does not expose, chiefly segmentation.
-
-`DataProfiler.py` and `DataProfiling_utils.py` are the original scripting modules. Every feature
-they had now lives in the package, so they are kept only so existing scripts keep importing; new
-code should not use them.
 
 ---
 
@@ -212,6 +206,23 @@ drift.describe_comparison().pivot(index="feature", columns="segment", values="50
   columns, so the profile describes the feature rather than thirty flags.
 - `optimize_memory(df)` applies the lossless dtype conversions on a frame you loaded yourself.
 - `dataframe_figure(table)` renders any DataFrame as one table image.
+
+Every static renderer — tables, histograms, box plots, missing-value charts, heatmaps and their
+paginated grid builders — supports the same optional image-saving contract:
+
+```python
+profiling.dataframe_figure(table, save=True)
+# -> Results_of_DataProfiling/dataframe.png
+
+profiling.histogram_figure(summary, save="images/income_distribution.png")
+# Parent folders are created automatically.
+```
+
+`save=False` (the default) only returns the Matplotlib figure, `save=True` chooses a descriptive
+PNG name under `Results_of_DataProfiling/`, and `save=path` writes to the supplied address.
+Multipage builders append `_01`, `_02`, and so on. Table images use the dashboard's navy-blue
+palette, wrap long headers onto at most two lines, align numbers consistently and display
+percentage columns to three decimal places.
 
 ### Spark and Databricks
 

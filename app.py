@@ -33,6 +33,17 @@ EXAMPLE_DATASETS = {
 CHARTS_PER_PAGE = 9
 PLOTLY_CONFIG = {"displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]}
 
+DESCRIBE_DISPLAY_LABELS = {
+    "DataType": "Data type",
+    "n_uniques (excl. Nulls)": "Unique values\n(excl. nulls)",
+    "n_Missing": "Missing\ncount",
+    "Perc. of Missing": "Missing\n(%)",
+    "n_Zeros": "Zero\ncount",
+    "Perc. of Zeros": "Zeros\n(%)",
+    "1st Most Freq": "Most frequent\nvalue",
+    "Perc. of 1st Most Freq": "Most frequent\n(%)",
+}
+
 
 st.set_page_config(
     page_title="Data Profiler Dashboard",
@@ -72,6 +83,50 @@ def table(frame, **kwargs) -> None:
     st.dataframe(frame, **_TABLE_WIDTH, **kwargs)
 
 
+def professional_table(
+    frame: pd.DataFrame,
+    *,
+    formats: dict[str, object] | None = None,
+    height: int = 600,
+) -> None:
+    """Render a compact audit table with wrapped headers and safe HTML values."""
+    styled = (
+        frame.style.format(
+            formats or {},
+            na_rep="—",
+            escape="html",
+            precision=3,
+        )
+        .hide(axis="index")
+        .set_properties(**{"text-align": "right"})
+    )
+    text_columns = [
+        column
+        for column in frame.columns
+        if not pd.api.types.is_numeric_dtype(frame[column].dtype)
+    ]
+    if text_columns:
+        styled = styled.set_properties(subset=text_columns, **{"text-align": "left"})
+    styled = styled.set_table_attributes('class="profile-table"')
+    st.markdown(
+        (
+            f'<div class="profile-table-wrap" style="max-height:{int(height)}px">'
+            f"{styled.to_html()}"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _compact_value(value: object) -> str:
+    """Format a numeric mode compactly while keeping text modes safe."""
+    if isinstance(value, (int, float, np.number)) and not isinstance(value, (bool, np.bool_)):
+        if pd.isna(value):
+            return "—"
+        return f"{value:,.4g}"
+    return str(value)
+
+
 def render_footer() -> None:
     """Page footer.
 
@@ -94,6 +149,46 @@ st.markdown(
       [data-testid="stMetricValue"] {font-size: 1.35rem;}
       [data-testid="stSidebar"] .stSlider {padding-bottom: 0.4rem;}
       div[data-testid="stExpander"] details summary p {font-weight: 600;}
+      .profile-table-wrap {
+        border: 1px solid #D6DEE5;
+        border-radius: 0.5rem;
+        overflow: auto;
+        margin: 0.4rem 0 0.8rem;
+      }
+      table.profile-table {
+        border-collapse: separate;
+        border-spacing: 0;
+        color: #22303C;
+        font-size: 0.88rem;
+        min-width: 100%;
+        width: max-content;
+      }
+      table.profile-table th {
+        background: #2F4B63;
+        border-bottom: 1px solid #D6DEE5;
+        border-right: 1px solid #D6DEE5;
+        color: white;
+        font-weight: 650;
+        line-height: 1.15;
+        padding: 0.65rem 0.75rem;
+        position: sticky;
+        text-align: center !important;
+        top: 0;
+        white-space: pre-line;
+        z-index: 2;
+      }
+      table.profile-table td {
+        border-bottom: 1px solid #D6DEE5;
+        border-right: 1px solid #D6DEE5;
+        padding: 0.5rem 0.75rem;
+        white-space: nowrap;
+      }
+      table.profile-table tbody tr:nth-child(odd) {background: #FFFFFF;}
+      table.profile-table tbody tr:nth-child(even) {background: #EEF3F7;}
+      table.profile-table tbody tr:hover {background: #E1EBF3;}
+      table.profile-table th:last-child,
+      table.profile-table td:last-child {border-right: 0;}
+      table.profile-table tbody tr:last-child td {border-bottom: 0;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -332,24 +427,30 @@ def describe_section(result: ProfilingResult) -> None:
         "Percentages are relative to the total row count. The most frequent value counts nulls "
         "as a candidate, so a mostly-empty column reports a null mode."
     )
+    display = (
+        result.describe.rename(columns=DESCRIBE_DISPLAY_LABELS)
+        .rename_axis("Feature")
+        .reset_index()
+    )
     formats = {
-        "Perc. of Missing": "{:.3f}%",
-        "Perc. of Zeros": "{:.3f}%",
-        "Perc. of 1st Most Freq": "{:.3f}%",
-        "1st Most Freq": "{:,.4g}",
+        "Missing\n(%)": "{:.3f}%",
+        "Zeros\n(%)": "{:.3f}%",
+        "Most frequent\n(%)": "{:.3f}%",
+        "Most frequent\nvalue": _compact_value,
         "Min": "{:,.4g}",
         "1%": "{:,.4g}",
         "50%": "{:,.4g}",
         "99%": "{:,.4g}",
         "Max": "{:,.4g}",
-        "n_uniques (excl. Nulls)": "{:,.0f}",
-        "n_Missing": "{:,.0f}",
-        "n_Zeros": "{:,.0f}",
+        "Unique values\n(excl. nulls)": "{:,.0f}",
+        "Missing\ncount": "{:,.0f}",
+        "Zero\ncount": "{:,.0f}",
     }
-    styled = result.describe.style.format(
-        {k: v for k, v in formats.items() if k in result.describe}, na_rep="-"
+    professional_table(
+        display,
+        formats={key: value for key, value in formats.items() if key in display},
+        height=min(680, 60 + 35 * len(display)),
     )
-    table(styled, height=min(680, 60 + 35 * len(result.describe)))
 
 
 def missing_section(result: ProfilingResult) -> None:
@@ -376,10 +477,16 @@ def missing_section(result: ProfilingResult) -> None:
     st.subheader("Per column")
     show_all = st.toggle("Include columns with no missing values", value=result.missing.empty)
     frame = result.missing_all if show_all else result.missing
-    table(
+    display = (
         frame.rename(
             columns={"number_of_missing": "Missing rows", "percentage_of_missing": "Missing (%)"}
-        ).style.format({"Missing rows": "{:,.0f}", "Missing (%)": "{:.4f}%"}),
+        )
+        .rename_axis("Feature")
+        .reset_index()
+    )
+    professional_table(
+        display,
+        formats={"Missing rows": "{:,.0f}", "Missing (%)": "{:.3f}%"},
         height=min(600, 60 + 35 * len(frame)),
     )
 
@@ -410,9 +517,10 @@ def correlation_section(result: ProfilingResult) -> None:
             st.success(f"No feature pair exceeds |r| > {threshold:g}.")
         else:
             st.markdown(f"**{len(top):,} pair{'s' if len(top) != 1 else ''} above the threshold**")
-            table(
-                top.style.format({value_column: "{:.4f}"}),
-                hide_index=True,
+            display_label = f"Absolute {method.capitalize()}\ncorrelation"
+            professional_table(
+                top.rename(columns={value_column: display_label}),
+                formats={display_label: "{:.4f}"},
                 height=min(480, 60 + 35 * len(top)),
             )
 
@@ -506,7 +614,7 @@ def outliers_section(result: ProfilingResult) -> None:
         flagged = [s for s in sorted(summaries, key=lambda s: -s.n_outliers)[:5] if s.n_outliers]
         if flagged:
             details = ", ".join(
-                f"`{s.feature}` ({s.n_outliers:,}, {100.0 * s.n_outliers / max(s.n_valid, 1):.2f}%)"
+                f"`{s.feature}` ({s.n_outliers:,}, {100.0 * s.n_outliers / max(s.n_valid, 1):.3f}%)"
                 for s in flagged
             )
             st.markdown(f"**Most outlier-heavy features:** {details}")

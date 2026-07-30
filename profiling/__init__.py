@@ -119,10 +119,12 @@ _LAZY_NAMES: dict[str, str] = {
     "static": "static",
     "report": "report",
     # profiling.static
+    "DEFAULT_SAVE_DIR": "static",
     "PALETTE": "static",
     "box_figure": "static",
     "box_grid_figures": "static",
     "dataframe_figure": "static",
+    "df_to_img": "static",
     "figure_to_png": "static",
     "heatmap_figure": "static",
     "histogram_figure": "static",
@@ -205,6 +207,7 @@ __all__ = [
     "run_profiling",
     "run_segmented_profiling",
     # figures and export (loaded on first use)
+    "DEFAULT_SAVE_DIR",
     "PALETTE",
     "box_figure",
     "box_grid_figures",
@@ -212,6 +215,7 @@ __all__ = [
     "build_zip",
     "bundle_files",
     "dataframe_figure",
+    "df_to_img",
     "figure_to_png",
     "heatmap_figure",
     "histogram_figure",

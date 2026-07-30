@@ -91,7 +91,7 @@ def histogram_figure(
 def _axis_values(counts: np.ndarray, show_percentage: bool) -> tuple[np.ndarray, str, str]:
     total = int(counts.sum())
     if show_percentage and total:
-        return counts / total * 100.0, "Percentage of valid values", ":.2f"
+        return counts / total * 100.0, "Percentage of valid values", ":.3f"
     return counts.astype(float), "Count", ":,d"
 
 
@@ -106,7 +106,7 @@ def _numeric_figure(
         return empty_figure(f"{summary.feature}: no non-missing values")
 
     values, y_title, _ = _axis_values(summary.counts, show_percentage)
-    value_format = ".2f" if show_percentage else ",d"
+    value_format = ".3f" if show_percentage else ",d"
     suffix = "%" if show_percentage else ""
 
     # Quantile bins have wildly different widths, so they read better on a
@@ -156,7 +156,7 @@ def _categorical_figure(
         return empty_figure(f"{summary.feature}: no non-missing values")
 
     values, y_title, _ = _axis_values(summary.counts, show_percentage)
-    value_format = ".2f" if show_percentage else ",d"
+    value_format = ".3f" if show_percentage else ",d"
     suffix = "%" if show_percentage else ""
 
     figure = go.Figure()
