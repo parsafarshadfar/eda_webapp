@@ -33,6 +33,7 @@ from .static import (
     A4_LANDSCAPE,
     box_figure,
     box_grid_figures,
+    df_to_img,
     figure_to_png,
     heatmap_figure,
     histogram_figure,
@@ -282,16 +283,7 @@ def build_pdf(result: ProfilingResult) -> bytes:
         writer.add(_overview_page(result))
 
         if settings.include_describe and result.describe is not None:
-            writer.add_all(
-                table_figures(
-                    result.describe,
-                    title="1. Descriptive statistics",
-                    subtitle=f"{len(result.describe):,} numeric features",
-                    rows_per_page=20,
-                    show_index=True,
-                    index_label="Feature",
-                )
-            )
+            writer.add_all(_descriptive_table_pages(result.describe))
 
         if settings.include_missing and result.missing_all is not None:
             writer.add(missing_bar_figure(result.missing, fit_page=True))
@@ -366,6 +358,41 @@ def build_pdf(result: ProfilingResult) -> bytes:
         info["ModDate"] = result.generated_at
 
     return buffer.getvalue()
+
+
+def _descriptive_table_pages(
+    frame: pd.DataFrame,
+    *,
+    rows_per_page: int = 20,
+) -> list[Figure]:
+    """Render PDF description pages through the public ``df_to_img`` helper."""
+    rows_per_page = max(1, int(rows_per_page))
+    starts = list(range(0, len(frame), rows_per_page)) or [0]
+    n_pages = len(starts)
+    figures: list[Figure] = []
+
+    for page_number, start in enumerate(starts, start=1):
+        stop = min(start + rows_per_page, len(frame))
+        page = frame.iloc[start:stop]
+        title = "1. Descriptive statistics"
+        if n_pages > 1:
+            title += f" ({page_number}/{n_pages})"
+        subtitle = f"{len(frame):,} numeric features"
+        if n_pages > 1:
+            subtitle += f" | showing features {start + 1}-{stop}"
+
+        figures.append(
+            df_to_img(
+                page,
+                title=title,
+                subtitle=subtitle,
+                show_index=True,
+                index_label="Feature",
+                fit_page=True,
+            )
+        )
+
+    return figures
 
 
 def _overview_page(result: ProfilingResult) -> Figure:
@@ -477,14 +504,13 @@ def bundle_files(
         yield (
             f"{folder}/descriptive_statistics.png",
             as_png(
-                table_figures(
+                df_to_img(
                     result.describe,
                     title="Descriptive statistics",
-                    rows_per_page=max(len(result.describe), 1),
                     show_index=True,
                     index_label="Feature",
                     fit_page=False,
-                )[0],
+                ),
                 crop=True,
             ),
         )

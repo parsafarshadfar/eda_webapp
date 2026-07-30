@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -230,6 +231,48 @@ class StaticRenderingTests(unittest.TestCase):
                 self.assertTrue(
                     (profiling.DEFAULT_SAVE_DIR / "dataframe.png").is_file()
                 )
+
+    def test_pdf_and_bundle_descriptive_tables_use_df_to_img(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "Income": [1.0, 2.0, 3.0, 4.0],
+                "Long numeric feature name": [10.0, 12.0, 14.0, 16.0],
+            }
+        )
+        settings = profiling.ProfilingSettings(
+            selected_features=tuple(frame.columns),
+            include_missing=False,
+            include_correlation=False,
+            include_histograms=False,
+            include_box_plots=False,
+        )
+        result = profiling.run_profiling(frame, settings, dataset_name="example.csv")
+        report_module = profiling.report
+
+        with patch.object(
+            report_module,
+            "df_to_img",
+            wraps=profiling.df_to_img,
+        ) as renderer:
+            pdf = report_module.build_pdf(result)
+
+            self.assertTrue(pdf.startswith(b"%PDF-"))
+            self.assertEqual(renderer.call_count, 1)
+            self.assertTrue(renderer.call_args.kwargs["show_index"])
+            self.assertTrue(renderer.call_args.kwargs["fit_page"])
+            self.assertEqual(renderer.call_args.kwargs["index_label"], "Feature")
+
+            renderer.reset_mock()
+            files = dict(
+                report_module.bundle_files(
+                    result,
+                    include_pdf=False,
+                    include_individual_charts=False,
+                )
+            )
+            image = files["01_descriptive_statistics/descriptive_statistics.png"]
+            self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(renderer.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -122,10 +122,10 @@ def _color(index: int) -> str:
 def _format_cell(value: object, max_length: int = 22, *, percentage: bool = False) -> str:
     """Compact, human-readable rendering of a single table cell."""
     if value is None:
-        return "—"
+        return "-"
     try:
         if bool(pd.isna(value)):
-            return "—"
+            return "-"
     except (TypeError, ValueError):
         pass
     if isinstance(value, (bool, np.bool_)):
@@ -136,7 +136,7 @@ def _format_cell(value: object, max_length: int = 22, *, percentage: bool = Fals
     if isinstance(value, (float, np.floating)):
         number = float(value)
         if math.isnan(number):
-            return "—"
+            return "-"
         if not math.isfinite(number):
             return "inf" if number > 0 else "-inf"
         if percentage:
@@ -322,6 +322,7 @@ def dataframe_figure(
     frame: pd.DataFrame,
     *,
     title: str | None = None,
+    subtitle: str | None = None,
     decimals: int | None = 3,
     show_index: bool = False,
     index_label: str = "Feature",
@@ -348,6 +349,8 @@ def dataframe_figure(
     frame
         Table to draw. An empty frame produces a figure saying so rather than
         raising.
+    subtitle
+        Optional explanatory line displayed below the title.
     decimals
         Rounding applied to numeric cells before rendering. ``None`` leaves the
         values untouched.
@@ -368,6 +371,7 @@ def dataframe_figure(
         figure = table_figures(
             rounded,
             title=title,
+            subtitle=subtitle,
             rows_per_page=max(len(rounded), 1),
             show_index=show_index,
             index_label=index_label,
