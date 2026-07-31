@@ -41,6 +41,7 @@ from .stats import (
 )
 from .summaries import (
     EQUAL_WIDTH,
+    QUANTILE,
     BoxSummary,
     CategoricalDistribution,
     NumericDistribution,
@@ -79,6 +80,11 @@ class ProfilingSettings:
     correlation_methods: tuple[str, ...] = ("kendall",)
     correlation_threshold: float = 0.65
     correlation_max_rows: int | None = None
+    #: Share of rows every analysis runs on, as a percentage. 100 uses the whole
+    #: dataset. This is the blunt, whole-run control for a file too large to
+    #: profile comfortably; ``correlation_max_rows`` above is the finer one that
+    #: thins only the correlation step, and the two compose.
+    sample_percent: float = 100.0
     binning: str = EQUAL_WIDTH
     n_bins: int = 8
     max_categories: int = 30
@@ -97,6 +103,7 @@ class ProfilingSettings:
             "correlation_methods": list(self.correlation_methods),
             "correlation_threshold": self.correlation_threshold,
             "correlation_max_rows": self.correlation_max_rows,
+            "sample_percent": self.sample_percent,
             "binning": self.binning,
             "n_bins": self.n_bins,
             "max_categories": self.max_categories,
@@ -210,18 +217,59 @@ def run_profiling(
     progress
         Optional ``callback(label, fraction)`` used to drive a progress bar.
     """
-    features = [f for f in settings.selected_features if f in data.columns]
-    if not features:
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("run_profiling() expects a pandas DataFrame")
+    if not data.columns.is_unique:
+        duplicates = data.columns[data.columns.duplicated()].unique().tolist()
+        raise ValueError(
+            "run_profiling() requires unique column names; duplicates: "
+            + ", ".join(map(str, duplicates[:12]))
+        )
+    _validate_settings(settings)
+    normalised_methods = tuple(
+        dict.fromkeys(method.casefold() for method in settings.correlation_methods)
+    )
+    if normalised_methods != settings.correlation_methods:
+        settings = replace(settings, correlation_methods=normalised_methods)
+
+    requested = list(dict.fromkeys(settings.selected_features))
+    unavailable = [feature for feature in requested if feature not in data.columns]
+    features = [feature for feature in requested if feature in data.columns]
+    if requested and not features:
+        raise ValueError(
+            "None of selected_features are present in the data: "
+            + ", ".join(map(str, unavailable[:12]))
+        )
+    if not requested:
         features = list(data.columns)
+        settings = replace(settings, selected_features=tuple(features))
+    elif tuple(features) != settings.selected_features:
         settings = replace(settings, selected_features=tuple(features))
 
     frame = data[features]
+
+    # Subsample before anything is measured, so every table, chart and export in
+    # the run describes exactly the same rows. Seeded by random_state, so the
+    # same settings profile the same sample.
+    n_rows_supplied = int(data.shape[0])
+    rows_analysed = n_rows_supplied
+    if settings.sample_percent < 100.0 and n_rows_supplied:
+        keep = max(1, int(round(n_rows_supplied * settings.sample_percent / 100.0)))
+        if keep < n_rows_supplied:
+            positions = np.sort(
+                np.random.default_rng(settings.random_state).choice(
+                    n_rows_supplied, size=keep, replace=False
+                )
+            )
+            frame = frame.iloc[positions]
+            rows_analysed = keep
+
     numeric = numeric_columns(frame)
 
     result = ProfilingResult(
         dataset_name=dataset_name,
         settings=settings,
-        n_rows=int(data.shape[0]),
+        n_rows=rows_analysed,
         n_cols_total=int(data.shape[1]),
         generated_at=datetime.now().astimezone(),
         numeric_features=tuple(numeric),
@@ -229,6 +277,20 @@ def run_profiling(
         memory_mb=float(frame.memory_usage(deep=True).sum()) / (1024.0 * 1024.0),
         source_info=dict(source_info or {}),
     )
+
+    if rows_analysed != n_rows_supplied:
+        result.notes.append(
+            f"Every analysis in this run used a deterministic {settings.sample_percent:g}% "
+            f"subsample: {rows_analysed:,} of {n_rows_supplied:,} rows (seed "
+            f"{settings.random_state})."
+        )
+
+    if unavailable:
+        result.notes.append(
+            f"{len(unavailable)} requested feature(s) were not present and were skipped: "
+            + ", ".join(map(str, unavailable[:12]))
+            + ("..." if len(unavailable) > 12 else "")
+        )
 
     if dtype_labels:
         result.dtypes = {name: dtype_labels.get(name, result.dtypes[name]) for name in result.dtypes}
@@ -296,9 +358,16 @@ def run_profiling(
         advance("Box plots")
 
     skipped = [f for f in features if not is_numeric_series(frame[f])]
-    if skipped and settings.include_box_plots:
+    excluded_from = []
+    if settings.include_correlation:
+        excluded_from.append("correlation")
+    if settings.include_box_plots:
+        excluded_from.append("box-plot")
+    if skipped and excluded_from:
         result.notes.append(
-            f"{len(skipped)} non-numeric feature(s) are excluded from correlation and box-plot "
+            f"{len(skipped)} non-numeric feature(s) are excluded from "
+            + " and ".join(excluded_from)
+            + " "
             "analysis: " + ", ".join(map(str, skipped[:12])) + ("..." if len(skipped) > 12 else "")
         )
 
@@ -316,6 +385,58 @@ def _enabled_steps(settings: ProfilingSettings) -> list[str]:
         (settings.include_box_plots, "box"),
     ]
     return [name for enabled, name in flags if enabled]
+
+
+def _validate_settings(settings: ProfilingSettings) -> None:
+    """Validate configuration before allocating analysis-sized intermediates."""
+    if not isinstance(settings, ProfilingSettings):
+        raise TypeError("settings must be a ProfilingSettings instance")
+
+    if settings.binning not in (EQUAL_WIDTH, QUANTILE):
+        raise ValueError(
+            f"binning must be {EQUAL_WIDTH!r} or {QUANTILE!r}; got {settings.binning!r}"
+        )
+    for name, value in (
+        ("n_bins", settings.n_bins),
+        ("max_categories", settings.max_categories),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(f"{name} must be a positive integer")
+        if int(value) <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+    try:
+        threshold = float(settings.correlation_threshold)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("correlation_threshold must be a number between 0 and 1") from exc
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("correlation_threshold must be between 0 and 1")
+
+    supported = {"pearson", "spearman", "kendall"}
+    for method in settings.correlation_methods:
+        if not isinstance(method, str):
+            raise TypeError("correlation methods must be strings")
+        if method.casefold() not in supported:
+            raise ValueError(
+                f"Unsupported correlation method {method!r}; "
+                f"expected one of {sorted(supported)}."
+            )
+
+    limit = settings.correlation_max_rows
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, (int, np.integer)):
+            raise TypeError("correlation_max_rows must be a positive integer or None")
+        if int(limit) <= 0:
+            raise ValueError("correlation_max_rows must be a positive integer or None")
+
+    if isinstance(settings.sample_percent, bool):
+        raise TypeError("sample_percent must be a number between 0 and 100")
+    try:
+        share = float(settings.sample_percent)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("sample_percent must be a number between 0 and 100") from exc
+    if not np.isfinite(share) or not 0.0 < share <= 100.0:
+        raise ValueError("sample_percent must be greater than 0 and at most 100")
 
 
 class _timer:

@@ -36,6 +36,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
+from . import storage
 from .summaries import (
     KIND_CATEGORICAL,
     QUANTILE,
@@ -46,7 +47,6 @@ from .summaries import (
 
 __all__ = [
     "A4_LANDSCAPE",
-    "DEFAULT_SAVE_DIR",
     "PALETTE",
     "figure_to_png",
     "save_figure",
@@ -64,9 +64,6 @@ __all__ = [
 
 #: Page size shared by every exported page, in inches.
 A4_LANDSCAPE = (11.69, 8.27)
-
-#: Stable location used when a renderer is called with ``save=True``.
-DEFAULT_SAVE_DIR = Path("Results_of_DataProfiling")
 
 PALETTE = (
     "#4C78A8",
@@ -86,7 +83,9 @@ _ROW_COLORS = ("#EEF3F7", "#FFFFFF")
 _GRID_COLOR = "#D6DEE5"
 _TEXT_COLOR = "#22303C"
 
-_DEFAULT_DPI = 160
+# Table and chart images are read on screen and pasted into documents, so
+# they are rendered well above screen resolution.
+_DEFAULT_DPI = 240
 
 SaveTarget = bool | str | os.PathLike[str]
 
@@ -218,22 +217,28 @@ def _safe_image_stem(value: object) -> str:
     return stem or "figure"
 
 
-def _resolve_save_path(save: SaveTarget | None, default_name: str) -> Path | None:
+def _resolve_save_address(save: SaveTarget | None, default_name: str) -> str | None:
+    """Turn a ``save`` argument into one output address, or ``None``.
+
+    ``True`` means "the standard place with a sensible name" -- the folder
+    reported by :func:`profiling.output_dir`. A folder address saves under that
+    folder with the same sensible name; a file address is used verbatim, and a
+    missing extension becomes ``.png``.
+    """
     if save is False or save is None:
         return None
     if save is True:
-        target = DEFAULT_SAVE_DIR / default_name
-    elif isinstance(save, (str, os.PathLike)):
-        target = Path(save)
-        if target.exists() and target.is_dir():
-            target /= default_name
-        elif not target.suffix:
-            target = target.with_suffix(".png")
-    else:
-        raise TypeError("save must be False, True, or a filesystem path")
+        return storage.join_address(storage.default_output_dir(), default_name)
+    if not isinstance(save, (str, os.PathLike)):
+        raise TypeError("save must be False, True, or a filesystem/cloud address")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
+    address = str(save)
+    looks_like_folder = address.rstrip().endswith(("/", "\\")) or (
+        not storage.is_remote(address) and Path(address).is_dir()
+    )
+    if looks_like_folder:
+        return storage.join_address(address, default_name)
+    return storage.with_suffix(address, ".png")
 
 
 def _save_requested(
@@ -243,11 +248,11 @@ def _save_requested(
     *,
     dpi: int = _DEFAULT_DPI,
     crop: bool = True,
-) -> Path | None:
-    path = _resolve_save_path(save, default_name)
-    if path is not None:
-        save_figure(figure, path, dpi=dpi, crop=crop)
-    return path
+) -> str | None:
+    address = _resolve_save_address(save, default_name)
+    if address is not None:
+        save_figure(figure, address, dpi=dpi, crop=crop)
+    return address
 
 
 def _save_pages(
@@ -258,17 +263,16 @@ def _save_pages(
     dpi: int = _DEFAULT_DPI,
     crop: bool = True,
 ) -> None:
-    path = _resolve_save_path(save, default_name)
-    if path is None:
+    address = _resolve_save_address(save, default_name)
+    if address is None:
         return
 
     if len(figures) == 1:
-        save_figure(figures[0], path, dpi=dpi, crop=crop)
+        save_figure(figures[0], address, dpi=dpi, crop=crop)
         return
 
     for page, figure in enumerate(figures, start=1):
-        numbered = path.with_name(f"{path.stem}_{page:02d}{path.suffix}")
-        save_figure(figure, numbered, dpi=dpi, crop=crop)
+        save_figure(figure, storage.numbered_address(address, page), dpi=dpi, crop=crop)
 
 
 def figure_to_png(figure: Figure, dpi: int = _DEFAULT_DPI, *, crop: bool = False) -> bytes:
@@ -296,14 +300,14 @@ def save_figure(
     dpi: int = _DEFAULT_DPI,
     *,
     crop: bool = True,
-) -> None:
-    """Write a figure to disk, creating its parent directory when needed."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    FigureCanvasAgg(figure)
-    figure.savefig(
-        target, dpi=dpi, facecolor="white", **({"bbox_inches": "tight"} if crop else {})
-    )
+) -> str:
+    """Write a figure to ``path``, creating its parent folder when needed.
+
+    The PNG is rendered in memory and then written in one operation, so a DBFS
+    or ADLS address works exactly like a local one. The written address is
+    returned, which is handy for printing it.
+    """
+    return storage.write_figure(figure, path, dpi=dpi, crop=crop)
 
 
 def save_table_png(
@@ -311,11 +315,10 @@ def save_table_png(
     path: str | os.PathLike[str],
     title: str | None = None,
     dpi: int = _DEFAULT_DPI,
-) -> None:
+) -> str | None:
     """Render a whole DataFrame as a single PNG table."""
     figures = table_figures(frame, title=title, rows_per_page=len(frame) or 1, fit_page=False)
-    if figures:
-        save_figure(figures[0], path, dpi=dpi)
+    return save_figure(figures[0], path, dpi=dpi) if figures else None
 
 
 def dataframe_figure(
@@ -358,11 +361,11 @@ def dataframe_figure(
         Use the shared A4 landscape canvas. The default sizes the image to its
         content, while ``True`` is convenient for a slide or report page.
     save
-        ``False`` renders only. ``True`` also writes a named PNG under
-        :data:`DEFAULT_SAVE_DIR`; a filesystem path writes to that address.
-        Parent directories are created automatically.
+        ``False`` renders only. ``True`` also writes a named PNG into the
+        standard output folder (:func:`profiling.output_dir`); a path or cloud
+        address writes there instead. Parent folders are created automatically.
     save_as
-        Backward-compatible alias for a custom ``save`` path. Do not pass both.
+        Backward-compatible alias for a custom ``save`` address. Do not pass both.
     """
     if frame is None or frame.empty:
         figure = _message_figure(title or "Table", "No data to display")
@@ -411,12 +414,13 @@ def df_to_img(
     round: int | None = 3,
     **kwargs,
 ) -> Figure:
-    """Compatibility convenience for rendering a dataframe as a blue table.
+    """Render a dataframe as a blue, publication-ready table image.
 
-    New code can call :func:`dataframe_figure` directly. This wrapper preserves
-    the familiar ``df_to_img`` arguments while keeping the implementation in
-    the package. ``save=True`` uses :data:`DEFAULT_SAVE_DIR`; when a non-default
-    ``save_name`` is supplied, that address is used instead.
+    The familiar ``df_to_img`` interface, delegating to
+    :func:`dataframe_figure`. ``save=True`` writes into the standard output
+    folder (:func:`profiling.output_dir`); ``save=<address>`` -- or the legacy
+    ``save=True, save_name=<address>`` -- writes to that address instead, local
+    or cloud.
     """
     frame = data.to_pandas() if hasattr(data, "to_pandas") else data
     save_target: SaveTarget = save
@@ -475,9 +479,9 @@ def table_figures(
     highlight
         ``(row, column)`` positions, relative to the whole frame, to shade.
     save
-        ``False`` renders only. ``True`` writes into
-        :data:`DEFAULT_SAVE_DIR`; a path selects the output address. Multiple
-        pages receive ``_01``, ``_02``, ... suffixes.
+        ``False`` renders only. ``True`` writes into the standard output folder
+        (:func:`profiling.output_dir`); an address selects where instead.
+        Multiple pages receive ``_01``, ``_02``, ... suffixes.
     """
     if frame is None or frame.shape[1] == 0:
         figures = [_message_figure(title or "Table", "No data available")]
@@ -899,8 +903,11 @@ def _draw_histogram(axes, summary, color: str, show_percentage: bool) -> None:
     axes.set_axisbelow(True)
     for spine in ("top", "right"):
         axes.spines[spine].set_visible(False)
+    non_finite = getattr(summary, "n_non_finite", 0)
+    extra = f", {non_finite:,} non-finite" if non_finite else ""
     axes.set_title(
-        f"{summary.feature}  ({summary.n_valid:,} values, {summary.n_missing:,} missing)",
+        f"{summary.feature}  ({summary.n_valid:,} values, "
+        f"{summary.n_missing:,} missing{extra})",
         fontsize=8.5,
         color=_TEXT_COLOR,
     )
@@ -935,6 +942,20 @@ def histogram_figure(
 def _draw_box(axes, summary: BoxSummary, color: str) -> None:
     if summary.n_valid == 0:
         axes.text(0.5, 0.5, "no non-missing values", ha="center", va="center", fontsize=8, color="#8899A6")
+        axes.set_xlabel(summary.feature, fontsize=9)
+        axes.set_xticks([])
+        axes.set_yticks([])
+        return
+    if not np.isfinite([summary.q1, summary.median, summary.q3]).all():
+        axes.text(
+            0.5,
+            0.5,
+            "no finite values",
+            ha="center",
+            va="center",
+            fontsize=8,
+            color="#8899A6",
+        )
         axes.set_xlabel(summary.feature, fontsize=9)
         axes.set_xticks([])
         axes.set_yticks([])
@@ -976,8 +997,11 @@ def _draw_box(axes, summary: BoxSummary, color: str) -> None:
     for spine in ("top", "right", "left"):
         axes.spines[spine].set_visible(False)
     shown = "" if not summary.outliers_truncated else f", {summary.outliers.size:,} drawn"
+    non_finite = getattr(summary, "n_non_finite", 0)
+    extra = f", {non_finite:,} non-finite" if non_finite else ""
     axes.set_title(
-        f"{summary.feature}  ({summary.n_valid:,} values, {summary.n_outliers:,} outside 1.5xIQR{shown})",
+        f"{summary.feature}  ({summary.n_valid:,} values, "
+        f"{summary.n_outliers:,} outside 1.5xIQR{shown}{extra})",
         fontsize=8.5,
         color=_TEXT_COLOR,
     )
@@ -1011,6 +1035,8 @@ def box_figure(
 def _grid_pages(
     n_items: int, n_cols: int, n_rows: int
 ) -> list[tuple[int, int]]:
+    if n_cols < 1 or n_rows < 1:
+        raise ValueError("n_cols and n_rows must be positive integers")
     per_page = n_cols * n_rows
     return [(start, min(start + per_page, n_items)) for start in range(0, n_items, per_page)]
 
@@ -1030,6 +1056,15 @@ def histogram_grid_figures(
 
     Saved multipage output receives deterministic ``_01``, ``_02``, ... names.
     """
+    if isinstance(n_cols, bool) or isinstance(n_rows, bool):
+        raise TypeError("n_cols and n_rows must be positive integers")
+    try:
+        n_cols, n_rows = int(n_cols), int(n_rows)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("n_cols and n_rows must be positive integers") from exc
+    if n_cols < 1 or n_rows < 1:
+        raise ValueError("n_cols and n_rows must be positive integers")
+
     if not summaries:
         figures = [_message_figure(title, "No features selected")]
         _save_pages(
@@ -1078,6 +1113,15 @@ def box_grid_figures(
 
     Saved multipage output receives deterministic ``_01``, ``_02``, ... names.
     """
+    if isinstance(n_rows, bool):
+        raise TypeError("n_rows must be a positive integer")
+    try:
+        n_rows = int(n_rows)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("n_rows must be a positive integer") from exc
+    if n_rows < 1:
+        raise ValueError("n_rows must be a positive integer")
+
     if not summaries:
         figures = [_message_figure(title, "No numeric features selected")]
         _save_pages(

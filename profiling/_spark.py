@@ -86,8 +86,9 @@ def _labelled_buckets(sdf: Any, grouping_var: str, splits: list[float], labels: 
     bucketed = bucketed.pandas_api()
 
     groups: dict[str, Any] = {}
+    grouped = bucketed.groupby("bucket")
     for key in bucketed["bucket"].unique().dropna().to_list():
-        groups[key] = bucketed.groupby("bucket").get_group(key).index
+        groups[key] = grouped.get_group(key).index
     return groups
 
 
@@ -109,8 +110,9 @@ def spark_groups(
     if bins is None and n_bins is None and n_quantiles is None:
         frame = to_pandas_api(frame)
         groups: dict[str, Any] = {}
+        grouped = frame.groupby(grouping_var)
         for key in frame[grouping_var].unique().dropna().to_list():
-            groups[key] = frame.groupby(grouping_var).get_group(key).index
+            groups[key] = grouped.get_group(key).index
         return groups
 
     sdf = _to_spark(frame)
@@ -174,8 +176,9 @@ def spark_groups(
     bucketed = bucketed.withColumn("bucket", udf(map_bucket)(col("bucket"))).pandas_api()
 
     groups = {}
+    grouped = bucketed.groupby("bucket")
     for key in bucketed["bucket"].unique().dropna().to_list():
-        groups[key] = bucketed.groupby("bucket").get_group(key).index
+        groups[key] = grouped.get_group(key).index
     return groups
 
 
@@ -183,9 +186,9 @@ def spark_concat(frames: dict[str, Any], tag_column: str) -> Any:
     """Concatenate Spark frames, tagging each row with the key it came from."""
     import pyspark.pandas as ps
 
-    combined = ps.DataFrame({})
+    tagged_frames = []
     for key, frame in frames.items():
         tagged = to_pandas_api(frame).copy()
         tagged[tag_column] = key
-        combined = ps.concat([combined, tagged], ignore_index=True)
-    return combined
+        tagged_frames.append(tagged)
+    return ps.concat(tagged_frames, ignore_index=True)

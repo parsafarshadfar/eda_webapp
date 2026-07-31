@@ -133,7 +133,12 @@ def _numeric_figure(
         )
         figure.update_xaxes(title_text=summary.feature)
 
-    subtitle = f"{summary.n_valid:,} values, {summary.n_missing:,} missing, {summary.n_bins} bins"
+    non_finite = getattr(summary, "n_non_finite", 0)
+    extra = f", {non_finite:,} non-finite" if non_finite else ""
+    subtitle = (
+        f"{summary.n_valid:,} values, {summary.n_missing:,} missing{extra}, "
+        f"{summary.n_bins} bins"
+    )
     figure.update_yaxes(title_text=y_title, rangemode="tozero")
     figure.update_layout(
         **_BASE_LAYOUT,
@@ -191,6 +196,8 @@ def box_figure(
     """Horizontal box plot drawn from precomputed quartiles and fences."""
     if summary.n_valid == 0:
         return empty_figure(f"{summary.feature}: no non-missing values")
+    if not np.isfinite([summary.q1, summary.median, summary.q3]).all():
+        return empty_figure(f"{summary.feature}: no finite values")
 
     figure = go.Figure()
     figure.add_trace(
@@ -222,8 +229,14 @@ def box_figure(
     )
 
     if summary.outliers.size:
+        # SVG, not Scattergl. A WebGL canvas created inside a container that is
+        # hidden or zero-width at mount — a collapsed section, a column that has
+        # not been laid out yet — comes up blank and only paints once something
+        # forces a resize, which is why these plots used to appear only after
+        # the full-screen button. Outliers are capped at _MAX_OUTLIER_POINTS
+        # (1500), well inside what the SVG renderer handles comfortably.
         figure.add_trace(
-            go.Scattergl(
+            go.Scatter(
                 x=summary.outliers,
                 y=[summary.feature] * summary.outliers.size,
                 mode="markers",
@@ -234,9 +247,11 @@ def box_figure(
         )
 
     shown = "" if not summary.outliers_truncated else f" ({summary.outliers.size:,} shown)"
+    non_finite = getattr(summary, "n_non_finite", 0)
+    extra = f", {non_finite:,} non-finite" if non_finite else ""
     subtitle = (
         f"{summary.n_valid:,} values, {summary.n_missing:,} missing, "
-        f"{summary.n_outliers:,} outside 1.5xIQR{shown}"
+        f"{summary.n_outliers:,} outside 1.5xIQR{shown}{extra}"
     )
     figure.update_xaxes(title_text=summary.feature)
     figure.update_yaxes(showticklabels=False)

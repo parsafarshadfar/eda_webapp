@@ -1,6 +1,6 @@
 [server]
-maxUploadSize = 2048
-maxMessageSize = 2048
+maxUploadSize = 4096
+maxMessageSize = 4096
 # XSRF protection is left enabled. Disabling it lets a third-party page post
 # to the app on a visitor's behalf, which is not an acceptable trade for a
 # publicly reachable deployment.

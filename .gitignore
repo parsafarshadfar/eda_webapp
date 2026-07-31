@@ -14,13 +14,26 @@ build/
 dist/
 *.egg-info/
 .pytest_cache/
+.pytest_temp/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# Profiling output written by write_report_dir / write_segmented_report_dir
+# Saved results. One rule: results/ lives beside whatever produced it —
+# results/ beside app.py for the Streamlit app, and results/ beside each
+# example notebook. All of it is regenerated on demand.
+results/
+profiling_examples/results/
+drift_examples/results/
+
+# The executed HTML copies of the notebooks are deliberately tracked: they are
+# the human-readable record of a run. (No rule needed — listed here so the
+# intent is obvious.)
+
+# Folders written by earlier versions of the save helpers
 Results_of_DataProfiling/
+Results_DataDriftAssessment/
 
 # Notebook checkpoints
 .ipynb_checkpoints/

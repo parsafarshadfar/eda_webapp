@@ -18,6 +18,7 @@ reproduces :meth:`pandas.DataFrame.corr` exactly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -77,13 +78,45 @@ def quantiles_of_sorted(sorted_values: np.ndarray, quantiles: Sequence[float]) -
     weight = position - lower
     low_values = sorted_values[lower].astype(np.float64, copy=False)
     high_values = sorted_values[upper].astype(np.float64, copy=False)
-    return low_values + (high_values - low_values) * weight
+    result = np.empty(q.shape, dtype=np.float64)
+
+    # Avoid ``inf - inf`` and ``0 * inf`` warnings at exact order statistics.
+    exact = (lower == upper) | (low_values == high_values)
+    result[exact] = low_values[exact]
+
+    interpolate = ~exact & np.isfinite(low_values) & np.isfinite(high_values)
+    result[interpolate] = low_values[interpolate] + (
+        high_values[interpolate] - low_values[interpolate]
+    ) * weight[interpolate]
+
+    non_finite = ~(exact | interpolate)
+    result[non_finite] = np.where(
+        np.isneginf(low_values[non_finite])
+        & np.isposinf(high_values[non_finite]),
+        np.nan,
+        np.where(
+            np.isneginf(low_values[non_finite]),
+            -np.inf,
+            np.inf,
+        ),
+    )
+    return result
 
 
 def _sorted_valid_values(series: pd.Series) -> np.ndarray:
     """Sorted array of the non-null values of a numeric column."""
-    values = series.to_numpy(dtype=np.float64, na_value=np.nan, copy=False)
-    values = values[~np.isnan(values)]
+    dtype = series.dtype
+    if pd.api.types.is_integer_dtype(dtype):
+        # Keep integers as integers while sorting. Converting int64/uint64 to
+        # float64 first merges distinct values above 2**53 and can corrupt
+        # cardinality, mode, min and max.
+        target = np.uint64 if pd.api.types.is_unsigned_integer_dtype(dtype) else np.int64
+        raw = series.to_numpy(dtype=target, na_value=0, copy=False)
+        valid = ~series.isna().to_numpy(dtype=bool, copy=False)
+        values = raw[valid]
+    else:
+        raw = series.to_numpy(dtype=np.float64, na_value=np.nan, copy=False)
+        values = raw[~np.isnan(raw)]
     values.sort()
     return values
 
@@ -103,7 +136,10 @@ def _runs_of_sorted(sorted_values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     if n > 1:
         np.not_equal(sorted_values[1:], sorted_values[:-1], out=is_new[1:])
     starts = np.flatnonzero(is_new)
-    lengths = np.diff(np.append(starts, n)).astype(np.int64, copy=False)
+    lengths = np.empty(starts.size, dtype=np.int64)
+    if starts.size > 1:
+        np.subtract(starts[1:], starts[:-1], out=lengths[:-1], casting="unsafe")
+    lengths[-1] = n - starts[-1]
     return starts, lengths
 
 
@@ -124,7 +160,7 @@ def _numeric_column_stats(series: pd.Series, n_rows: int) -> dict[str, object]:
         # ``argmax`` returns the first maximum, so ties resolve to the smallest
         # value. That makes the reported mode reproducible run after run.
         best = int(np.argmax(lengths))
-        mode_value: float = float(sorted_values[starts[best]])
+        mode_value: object = sorted_values[starts[best]].item()
         mode_count = int(lengths[best])
     else:
         mode_value = np.nan
@@ -143,11 +179,11 @@ def _numeric_column_stats(series: pd.Series, n_rows: int) -> dict[str, object]:
         "n_Zeros": n_zeros,
         "1st Most Freq": mode_value,
         "Perc. of 1st Most Freq": (100.0 * mode_count / n_rows) if n_rows else np.nan,
-        "Min": float(sorted_values[0]) if n_valid else np.nan,
+        "Min": sorted_values[0].item() if n_valid else np.nan,
         "1%": float(q01),
         "50%": float(q50),
         "99%": float(q99),
-        "Max": float(sorted_values[-1]) if n_valid else np.nan,
+        "Max": sorted_values[-1].item() if n_valid else np.nan,
     }
 
 
@@ -156,13 +192,24 @@ def _discrete_column_stats(series: pd.Series, n_rows: int) -> dict[str, object]:
     n_valid = int(series.count())
     n_missing = int(n_rows - n_valid)
 
-    counts = series.value_counts(dropna=False, sort=True)
+    # One value-count pass gives both cardinality and the most frequent
+    # non-null value. Missing sentinels (None, NaN, pd.NA) are deliberately
+    # pooled into one candidate via ``n_missing``.
+    counts = series.value_counts(dropna=True, sort=True)
     if len(counts):
-        mode_value = counts.index[0]
         mode_count = int(counts.iloc[0])
+        tied = counts.index[counts.to_numpy(copy=False) == mode_count]
+        try:
+            mode_value = min(tied)
+        except TypeError:
+            mode_value = min(tied, key=lambda value: (type(value).__name__, str(value)))
     else:
         mode_value = np.nan
         mode_count = 0
+
+    if n_missing > mode_count:
+        mode_value = np.nan
+        mode_count = n_missing
 
     try:
         n_zeros = int((series == 0).sum())
@@ -170,7 +217,7 @@ def _discrete_column_stats(series: pd.Series, n_rows: int) -> dict[str, object]:
         n_zeros = 0
 
     return {
-        "n_uniques (excl. Nulls)": int(series.nunique(dropna=True)),
+        "n_uniques (excl. Nulls)": int(counts.size),
         "n_Missing": n_missing,
         "n_Zeros": n_zeros,
         "1st Most Freq": mode_value,
@@ -222,6 +269,8 @@ def describe_data(
     pandas.DataFrame
         One row per profiled column, indexed by column name.
     """
+    if not data.columns.is_unique:
+        raise ValueError("describe_data() requires unique column names.")
     if numeric_only:
         selected = numeric_columns(data)
     else:
@@ -262,10 +311,18 @@ def describe_data(
         result = result.drop(list(drop_columns), axis=1, errors="ignore")
 
     if saving_path is not None:
-        from .static import save_table_png
+        from .static import df_to_img
 
-        result.to_csv(f"{saving_path}/Data_Description.csv", index=True)
-        save_table_png(result, f"{saving_path}/Data_Description.png", title="Descriptive statistics")
+        folder = Path(saving_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        result.to_csv(folder / "Data_Description.csv", index=True)
+        figure = df_to_img(
+            result,
+            title="Descriptive statistics",
+            show_index=True,
+            save=folder / "Data_Description.png",
+        )
+        figure.clear()
 
     return result
 
@@ -295,7 +352,13 @@ def missing_count(
         Return only the columns that actually have missing values.
     """
     n_rows = int(data.shape[0])
-    counts = data.isna().sum(axis=0).to_numpy(dtype=np.int64)
+    # Summing one column at a time caps temporary memory at one boolean Series.
+    # ``data.isna()`` materialises an n_rows x n_columns boolean DataFrame.
+    counts = np.fromiter(
+        (int(series.isna().sum()) for _, series in data.items()),
+        dtype=np.int64,
+        count=int(data.shape[1]),
+    )
 
     missing = pd.DataFrame(
         {
@@ -311,10 +374,18 @@ def missing_count(
         result = result.sort_values(by="number_of_missing", ascending=False, kind="stable")
 
     if saving_path is not None:
-        from .static import save_table_png
+        from .static import df_to_img
 
-        missing.to_csv(f"{saving_path}/Missing_analysis.csv", index=True)
-        save_table_png(result, f"{saving_path}/Missing_analysis.png", title="Missing values")
+        folder = Path(saving_path)
+        folder.mkdir(parents=True, exist_ok=True)
+        missing.to_csv(folder / "Missing_analysis.csv", index=True)
+        figure = df_to_img(
+            result,
+            title="Missing values",
+            show_index=True,
+            save=folder / "Missing_analysis.png",
+        )
+        figure.clear()
 
     return result
 
@@ -340,6 +411,13 @@ def _prepare_correlation_input(
     max_rows: int | None,
     random_state: int,
 ) -> _CorrelationInput:
+    if max_rows is not None:
+        if isinstance(max_rows, bool) or not isinstance(max_rows, (int, np.integer)):
+            raise TypeError("max_rows must be a positive integer or None")
+        if int(max_rows) <= 0:
+            raise ValueError("max_rows must be a positive integer or None")
+        max_rows = int(max_rows)
+
     names = numeric_columns(data, list(columns) if columns is not None else None)
     n_rows_total = int(data.shape[0])
 
@@ -373,13 +451,14 @@ def _prepare_correlation_input(
     )
 
 
-def _pearson_dense(values: np.ndarray) -> np.ndarray:
+def _pearson_dense(values: np.ndarray, *, overwrite: bool = False) -> np.ndarray:
     """Pearson matrix for a matrix with no missing values, via one BLAS call."""
     n_rows, n_cols = values.shape
     if n_rows < 2 or n_cols == 0:
         return np.full((n_cols, n_cols), np.nan)
 
-    centered = values - values.mean(axis=0, keepdims=True)
+    centered = values if overwrite else values.copy()
+    centered -= centered.mean(axis=0, keepdims=True)
     norms = np.sqrt(np.einsum("ij,ij->j", centered, centered))
     with np.errstate(invalid="ignore", divide="ignore"):
         matrix = (centered.T @ centered) / np.outer(norms, norms)
@@ -417,15 +496,21 @@ def _kendall_pairwise(values: np.ndarray, *, max_workers: int | None = None) -> 
     matrix = np.full((n_cols, n_cols), np.nan)
     # Fortran order keeps each column contiguous, which is what SciPy wants.
     columns = np.asfortranarray(values)
-    valid = np.asfortranarray(~np.isnan(values))
-    n_valid = valid.sum(axis=0)
-    any_missing = bool((n_valid < values.shape[0]).any())
+    missing = np.isnan(columns)
+    any_missing = bool(missing.any())
+    if any_missing:
+        valid: np.ndarray | None = np.asfortranarray(~missing)
+        n_valid = valid.sum(axis=0)
+    else:
+        valid = None
+        n_valid = np.full(n_cols, values.shape[0], dtype=np.int64)
+    del missing
 
     # A feature with no spread has an undefined tau; detecting that once per
     # column avoids paying for a full O(n log n) pass that can only return NaN.
     constant = np.empty(n_cols, dtype=bool)
     for i in range(n_cols):
-        present = columns[:, i][valid[:, i]] if any_missing else columns[:, i]
+        present = columns[:, i][valid[:, i]] if valid is not None else columns[:, i]
         constant[i] = present.size == 0 or bool(np.all(present == present[0]))
 
     # ``DataFrame.corr`` leaves the diagonal undefined only for a column with
@@ -433,13 +518,18 @@ def _kendall_pairwise(values: np.ndarray, *, max_workers: int | None = None) -> 
     matrix[np.arange(n_cols), np.arange(n_cols)] = np.where(n_valid > 0, 1.0, np.nan)
 
     usable = np.flatnonzero(~constant)
-    pairs = [(int(i), int(j)) for k, i in enumerate(usable) for j in usable[k + 1 :]]
-    if not pairs:
+    n_pairs = int(usable.size * (usable.size - 1) // 2)
+    if n_pairs == 0:
         return matrix
+
+    def iter_pairs():
+        for position, i in enumerate(usable):
+            for j in usable[position + 1 :]:
+                yield int(i), int(j)
 
     def tau_for(pair: tuple[int, int]) -> tuple[int, int, float]:
         i, j = pair
-        if any_missing:
+        if valid is not None:
             mask = valid[:, i] & valid[:, j]
             if int(mask.sum()) < 2:
                 return i, j, np.nan
@@ -450,16 +540,27 @@ def _kendall_pairwise(values: np.ndarray, *, max_workers: int | None = None) -> 
             b = columns[:, j]
         return i, j, float(kendalltau(a, b, variant="b")[0])
 
-    workers = _worker_count(len(pairs), values.shape[0], max_workers)
+    workers = _worker_count(n_pairs, values.shape[0], max_workers)
     if workers > 1:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            computed = pool.map(tau_for, pairs)
-            for i, j, tau in computed:
-                matrix[i, j] = matrix[j, i] = tau
+            pairs = iter(iter_pairs())
+            pending = {
+                pool.submit(tau_for, pair)
+                for _, pair in zip(range(workers * 2), pairs)
+            }
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in completed:
+                    i, j, tau = future.result()
+                    matrix[i, j] = matrix[j, i] = tau
+                    try:
+                        pending.add(pool.submit(tau_for, next(pairs)))
+                    except StopIteration:
+                        pass
     else:
-        for pair in pairs:
+        for pair in iter_pairs():
             i, j, tau = tau_for(pair)
             matrix[i, j] = matrix[j, i] = tau
 
@@ -507,14 +608,25 @@ def correlation_matrix(
     random_state
         Seed for that subsample, so the result is reproducible.
     """
+    key = _normalise_correlation_method(method)
     prepared = _prepare_correlation_input(data, columns, max_rows, random_state)
-    return _correlation_from_input(prepared, method)
+    return _correlation_from_input(prepared, key)
+
+
+def _normalise_correlation_method(method: str) -> str:
+    if not isinstance(method, str):
+        raise TypeError("correlation method must be a string")
+    key = method.casefold()
+    if key not in _SUPPORTED_CORRELATIONS:
+        raise ValueError(
+            f"Unsupported correlation method: {method!r}. "
+            f"Expected one of {_SUPPORTED_CORRELATIONS}."
+        )
+    return key
 
 
 def _correlation_from_input(prepared: _CorrelationInput, method: str) -> pd.DataFrame:
-    key = method.lower()
-    if key not in _SUPPORTED_CORRELATIONS:
-        raise ValueError(f"Unsupported correlation method: {method!r}. Expected one of {_SUPPORTED_CORRELATIONS}.")
+    key = _normalise_correlation_method(method)
 
     names = prepared.columns
     if not names:
@@ -533,7 +645,7 @@ def _correlation_from_input(prepared: _CorrelationInput, method: str) -> pd.Data
         if not prepared.has_missing:
             # Ranking once and reusing the dense Pearson kernel turns an
             # O(k^2) Python loop into a single matrix product.
-            matrix = _pearson_dense(_rank_columns(values))
+            matrix = _pearson_dense(_rank_columns(values), overwrite=True)
         else:
             matrix = pd.DataFrame(values, columns=names, copy=False).corr(method="spearman").to_numpy()
     else:
@@ -555,8 +667,11 @@ def correlation_matrices(
     Preparing the numeric matrix once and reusing it is the reason this is
     cheaper than calling :func:`correlation_matrix` in a loop.
     """
+    normalised = list(dict.fromkeys(_normalise_correlation_method(method) for method in methods))
+    if not normalised:
+        return {}
     prepared = _prepare_correlation_input(data, columns, max_rows, random_state)
-    return {method.lower(): _correlation_from_input(prepared, method) for method in methods}
+    return {method: _correlation_from_input(prepared, method) for method in normalised}
 
 
 def top_absolute_correlations(
@@ -576,9 +691,21 @@ def top_absolute_correlations(
     if n < 2:
         return empty
 
+    if threshold is not None:
+        threshold = float(threshold)
+        if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between 0 and 1, or None")
+
     values = corr.to_numpy(dtype=np.float64, copy=False)
     rows, cols = np.triu_indices(n, k=1)
     magnitudes = np.abs(values[rows, cols])
+
+    keep = np.isfinite(magnitudes)
+    if threshold is not None:
+        keep &= magnitudes > threshold
+    rows, cols, magnitudes = rows[keep], cols[keep], magnitudes[keep]
+    if magnitudes.size == 0:
+        return empty
 
     order = np.argsort(-magnitudes, kind="stable")
     rows, cols, magnitudes = rows[order], cols[order], magnitudes[order]
@@ -591,6 +718,4 @@ def top_absolute_correlations(
             f"absolute {method_label} correlation values": magnitudes,
         }
     )
-    if threshold is not None:
-        result = result[result[f"absolute {method_label} correlation values"] > float(threshold)]
     return result.reset_index(drop=True)

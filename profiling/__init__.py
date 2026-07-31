@@ -17,6 +17,8 @@ and is then reused by every consumer:
 ``static``      static (Matplotlib) figures rendered from the same summaries
 ``pipeline``    orchestration: one run, or one run per segment
 ``report``      PDF, ZIP and folder export built from the summaries
+``storage``     where results are saved, and single-shot writing to local
+                folders, DBFS and ADLS
 
 Because the interactive charts and the exported charts are both derived from
 the same pre-aggregated summaries, the web app and the downloadable report can
@@ -28,17 +30,33 @@ Getting started
 
     import profiling
 
-    loaded = profiling.load_table("Examples/Data/HousingData_TrainData.csv")
+    loaded = profiling.load_table(
+        "profiling_examples/Data/HousingData_TrainData.csv"
+    )
     settings = profiling.ProfilingSettings(correlation_methods=("spearman",))
 
     result = profiling.run_profiling(loaded.frame, settings)
-    profiling.write_report_dir(result, "Results_of_DataProfiling")
+    profiling.write_report_dir(result)          # -> results/profiling/...
 
     # ...or one report per segment of the data:
     segmented = profiling.run_segmented_profiling(
         loaded.frame, settings, by="HouseAge", n_quantiles=4
     )
     segmented.describe_comparison()
+
+Where results are saved
+-----------------------
+Anything saved with ``save=True`` -- and any export given no address -- lands in
+``results/profiling/`` beside this repository. One call redirects all of it,
+which is what the example notebook does so its results appear next to it::
+
+    profiling.set_output_dir("profiling_examples/results")
+    profiling.output_dir()                      # where things go right now
+
+Any single call can still be pointed elsewhere with ``save=<address>``. Cloud
+addresses (``dbfs:/...``, ``abfss://...``) are supported: files are rendered in
+memory and written in one operation, never appended to, so a locked-down
+Databricks/ADLS destination accepts them.
 
 Importing ``profiling`` pulls in pandas and NumPy only. Matplotlib and Plotly
 are loaded the first time a plotting or export name is actually used, so a
@@ -53,7 +71,7 @@ __version__ = "2.1.0"
 
 # Submodules that cost nothing beyond pandas/NumPy are imported eagerly; the
 # names they export are re-exported here so a notebook needs one import.
-from . import dataio, grouping, stats, summaries  # noqa: E402
+from . import dataio, grouping, stats, storage, summaries  # noqa: E402
 from .dataio import (  # noqa: E402
     CombinedData,
     LoadedData,
@@ -87,6 +105,13 @@ from .pipeline import (  # noqa: E402
     run_profiling,
     run_segmented_profiling,
 )
+from .storage import (  # noqa: E402
+    default_output_dir,
+    join_address,
+    output_dir,
+    reset_output_dir,
+    set_output_dir,
+)
 from .stats import (  # noqa: E402
     correlation_matrices,
     correlation_matrix,
@@ -119,7 +144,6 @@ _LAZY_NAMES: dict[str, str] = {
     "static": "static",
     "report": "report",
     # profiling.static
-    "DEFAULT_SAVE_DIR": "static",
     "PALETTE": "static",
     "box_figure": "static",
     "box_grid_figures": "static",
@@ -153,7 +177,14 @@ __all__ = [
     "report",
     "static",
     "stats",
+    "storage",
     "summaries",
+    # where results are saved
+    "default_output_dir",
+    "join_address",
+    "output_dir",
+    "reset_output_dir",
+    "set_output_dir",
     # loading and preparation
     "CombinedData",
     "LoadedData",
@@ -207,7 +238,6 @@ __all__ = [
     "run_profiling",
     "run_segmented_profiling",
     # figures and export (loaded on first use)
-    "DEFAULT_SAVE_DIR",
     "PALETTE",
     "box_figure",
     "box_grid_figures",

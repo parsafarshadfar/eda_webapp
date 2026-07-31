@@ -96,6 +96,7 @@ class NumericDistribution:
     maximum: float
 
     kind: str = KIND_NUMERIC
+    n_non_finite: int = 0
 
     @property
     def centers(self) -> np.ndarray:
@@ -131,7 +132,11 @@ class CategoricalDistribution:
 
 @dataclass(frozen=True)
 class BoxSummary:
-    """Five-number summary plus Tukey fences for one numeric feature."""
+    """Five-number summary plus Tukey fences for one numeric feature.
+
+    Infinite values are counted as non-finite tail outliers but omitted from
+    the plotting sample; quartiles and moments use the finite observations.
+    """
 
     feature: str
     n_valid: int
@@ -149,6 +154,7 @@ class BoxSummary:
     n_outliers_high: int
     outliers: np.ndarray = field(default_factory=lambda: np.empty(0))
     outliers_truncated: bool = False
+    n_non_finite: int = 0
 
     @property
     def iqr(self) -> float:
@@ -220,12 +226,29 @@ def numeric_distribution(
     than requested bins gets one bin per distinct value, which avoids the
     degenerate single-bin result on flag-like columns.
     """
+    if not is_numeric_series(series):
+        raise TypeError("numeric_distribution() requires a real-valued numeric Series")
+    if binning not in (EQUAL_WIDTH, QUANTILE):
+        raise ValueError(
+            f"Unsupported binning method {binning!r}; expected {EQUAL_WIDTH!r} or {QUANTILE!r}."
+        )
+    if isinstance(n_bins, bool):
+        raise TypeError("n_bins must be a positive integer")
+    try:
+        n_bins = int(n_bins)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("n_bins must be a positive integer") from exc
+    if n_bins < 1:
+        raise ValueError("n_bins must be a positive integer")
+
     name = str(series.name)
     n_rows = int(series.size)
     values = _sorted_values(series)
     n_valid = int(values.size)
     n_missing = n_rows - n_valid
-    n_bins = max(1, int(n_bins))
+    finite_mask = np.isfinite(values)
+    finite_values = values if bool(finite_mask.all()) else values[finite_mask]
+    n_non_finite = n_valid - int(finite_values.size)
 
     if n_valid == 0:
         return NumericDistribution(
@@ -238,21 +261,51 @@ def numeric_distribution(
             n_missing=n_missing,
             minimum=np.nan,
             maximum=np.nan,
+            n_non_finite=0,
         )
 
-    n_distinct = int(np.unique(values).size)
+    if finite_values.size == 0:
+        return NumericDistribution(
+            feature=name,
+            edges=np.array([0.0, 1.0]),
+            counts=np.array([n_valid], dtype=np.int64),
+            labels=["non-finite values"],
+            binning=binning,
+            n_valid=n_valid,
+            n_missing=n_missing,
+            minimum=float(values[0]),
+            maximum=float(values[-1]),
+            n_non_finite=n_non_finite,
+        )
+
+    # The values are already sorted. Counting boundaries avoids allocating the
+    # full unique-value array merely to learn its length.
+    n_distinct = 1 + int(
+        np.count_nonzero(finite_values[1:] != finite_values[:-1])
+    )
 
     if binning == QUANTILE and n_distinct <= n_bins:
-        centers, counts = _distinct_value_bins(values)
+        centers, counts = _distinct_value_bins(finite_values)
         labels = [_format_number(float(v)) for v in centers]
         half = 0.5 if centers.size < 2 else float(np.min(np.diff(centers))) / 2.0
         edges = np.append(centers - half, centers[-1] + half)
     elif binning == QUANTILE:
-        edges, counts = _quantile_bins(values, n_bins)
+        edges, counts = _quantile_bins(finite_values, n_bins)
         labels = _interval_labels(edges)
     else:
-        edges, counts = _equal_width_bins(values, n_bins)
+        edges, counts = _equal_width_bins(finite_values, n_bins)
         labels = _interval_labels(edges)
+
+    if n_non_finite:
+        counts = counts.copy()
+        n_negative = int(np.count_nonzero(np.isneginf(values)))
+        n_positive = int(np.count_nonzero(np.isposinf(values)))
+        counts[0] += n_negative
+        counts[-1] += n_positive
+        if n_negative:
+            labels[0] = f"-∞ + {labels[0]}"
+        if n_positive:
+            labels[-1] = f"{labels[-1]} + ∞"
 
     return NumericDistribution(
         feature=name,
@@ -264,6 +317,7 @@ def numeric_distribution(
         n_missing=n_missing,
         minimum=float(values[0]),
         maximum=float(values[-1]),
+        n_non_finite=n_non_finite,
     )
 
 
@@ -273,6 +327,15 @@ def categorical_distribution(
     max_categories: int = _MAX_CATEGORIES,
 ) -> CategoricalDistribution:
     """Value counts for one discrete column, with a folded tail."""
+    if isinstance(max_categories, bool):
+        raise TypeError("max_categories must be a positive integer")
+    try:
+        max_categories = int(max_categories)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("max_categories must be a positive integer") from exc
+    if max_categories < 1:
+        raise ValueError("max_categories must be a positive integer")
+
     name = str(series.name)
     n_rows = int(series.size)
     counts = series.value_counts(dropna=True, sort=True)
@@ -328,15 +391,27 @@ def box_summary(
     Quartiles use linear interpolation, which is the convention Plotly and
     Matplotlib both default to, so the drawn box matches the reported numbers.
     Fences are the standard ``Q1 - 1.5*IQR`` / ``Q3 + 1.5*IQR`` pulled back to
-    the most extreme observation still inside them.
+    the most extreme observation still inside them. Infinite values are
+    reported as tail outliers rather than being passed to a plotting backend.
     """
     if not is_numeric_series(series):
         return None
+    if isinstance(max_outlier_points, bool):
+        raise TypeError("max_outlier_points must be a non-negative integer")
+    try:
+        max_outlier_points = int(max_outlier_points)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TypeError("max_outlier_points must be a non-negative integer") from exc
+    if max_outlier_points < 0:
+        raise ValueError("max_outlier_points must be a non-negative integer")
 
     name = str(series.name)
     n_rows = int(series.size)
     values = _sorted_values(series)
     n_valid = int(values.size)
+    finite_mask = np.isfinite(values)
+    finite_values = values if bool(finite_mask.all()) else values[finite_mask]
+    n_non_finite = n_valid - int(finite_values.size)
 
     if n_valid == 0:
         return BoxSummary(
@@ -354,25 +429,74 @@ def box_summary(
             upper_fence=np.nan,
             n_outliers_low=0,
             n_outliers_high=0,
+            n_non_finite=0,
         )
 
-    q1, median, q3 = quantiles_of_sorted(values, (0.25, 0.50, 0.75))
+    n_negative = int(np.count_nonzero(np.isneginf(values)))
+    n_positive = int(np.count_nonzero(np.isposinf(values)))
+    if finite_values.size == 0:
+        return BoxSummary(
+            feature=name,
+            n_valid=n_valid,
+            n_missing=n_rows - n_valid,
+            minimum=float(values[0]),
+            q1=np.nan,
+            median=np.nan,
+            q3=np.nan,
+            maximum=float(values[-1]),
+            mean=np.nan,
+            std=np.nan,
+            lower_fence=np.nan,
+            upper_fence=np.nan,
+            n_outliers_low=n_negative,
+            n_outliers_high=n_positive,
+            outliers=np.empty(0),
+            outliers_truncated=True,
+            n_non_finite=n_non_finite,
+        )
+
+    q1, median, q3 = quantiles_of_sorted(
+        finite_values,
+        (0.25, 0.50, 0.75),
+    )
     iqr = q3 - q1
     lower_limit = q1 - 1.5 * iqr
     upper_limit = q3 + 1.5 * iqr
 
-    low_cut = int(np.searchsorted(values, lower_limit, side="left"))
-    high_cut = int(np.searchsorted(values, upper_limit, side="right"))
+    low_cut = int(np.searchsorted(finite_values, lower_limit, side="left"))
+    high_cut = int(np.searchsorted(finite_values, upper_limit, side="right"))
+    n_finite = int(finite_values.size)
 
-    lower_fence = float(values[low_cut]) if low_cut < n_valid else float(values[0])
-    upper_fence = float(values[high_cut - 1]) if high_cut > 0 else float(values[-1])
+    lower_fence = (
+        float(finite_values[low_cut])
+        if low_cut < n_finite
+        else float(finite_values[0])
+    )
+    upper_fence = (
+        float(finite_values[high_cut - 1])
+        if high_cut > 0
+        else float(finite_values[-1])
+    )
 
-    outliers = np.concatenate((values[:low_cut], values[high_cut:]))
-    truncated = outliers.size > max_outlier_points
-    if truncated:
-        # Keep an evenly spaced, deterministic subset so the tails stay visible.
-        keep = np.linspace(0, outliers.size - 1, max_outlier_points).astype(np.intp)
-        outliers = outliers[keep]
+    n_finite_outliers = low_cut + (n_finite - high_cut)
+    truncated = n_non_finite > 0 or n_finite_outliers > max_outlier_points
+    if n_finite_outliers == 0 or max_outlier_points == 0:
+        outliers = np.empty(0, dtype=finite_values.dtype)
+    elif n_finite_outliers <= max_outlier_points:
+        outliers = np.concatenate(
+            (finite_values[:low_cut], finite_values[high_cut:])
+        )
+    else:
+        # Sample positions in the conceptual concatenation of the two tails.
+        # This avoids first materialising every outlier only to discard almost
+        # all of them on heavily skewed, multi-million-row columns.
+        keep = np.linspace(
+            0,
+            n_finite_outliers - 1,
+            max_outlier_points,
+        ).astype(np.intp)
+        source = np.where(keep < low_cut, keep, high_cut + keep - low_cut)
+        outliers = finite_values[source]
 
     return BoxSummary(
         feature=name,
@@ -383,14 +507,15 @@ def box_summary(
         median=float(median),
         q3=float(q3),
         maximum=float(values[-1]),
-        mean=float(values.mean()),
-        std=float(values.std(ddof=1)) if n_valid > 1 else 0.0,
+        mean=float(finite_values.mean()),
+        std=float(finite_values.std(ddof=1)) if n_finite > 1 else 0.0,
         lower_fence=lower_fence,
         upper_fence=upper_fence,
-        n_outliers_low=low_cut,
-        n_outliers_high=n_valid - high_cut,
+        n_outliers_low=n_negative + low_cut,
+        n_outliers_high=n_positive + n_finite - high_cut,
         outliers=outliers,
         outliers_truncated=truncated,
+        n_non_finite=n_non_finite,
     )
 
 
@@ -403,7 +528,10 @@ def build_distributions(
     max_categories: int = _MAX_CATEGORIES,
 ) -> dict[str, NumericDistribution | CategoricalDistribution]:
     """Summarise the distribution of every requested feature."""
-    names = list(data.columns) if features is None else [f for f in features if f in data.columns]
+    if not data.columns.is_unique:
+        raise ValueError("build_distributions() requires unique column names.")
+    requested = list(data.columns) if features is None else [f for f in features if f in data.columns]
+    names = list(dict.fromkeys(requested))
     summaries: dict[str, NumericDistribution | CategoricalDistribution] = {}
     for name in names:
         summary = distribution_of(
@@ -421,7 +549,10 @@ def build_box_summaries(
     max_outlier_points: int = _MAX_OUTLIER_POINTS,
 ) -> dict[str, BoxSummary]:
     """Summarise the spread of every requested numeric feature."""
-    names = list(data.columns) if features is None else [f for f in features if f in data.columns]
+    if not data.columns.is_unique:
+        raise ValueError("build_box_summaries() requires unique column names.")
+    requested = list(data.columns) if features is None else [f for f in features if f in data.columns]
+    names = list(dict.fromkeys(requested))
     summaries: dict[str, BoxSummary] = {}
     for name in names:
         summary = box_summary(data[name], max_outlier_points=max_outlier_points)
@@ -451,6 +582,7 @@ def distributions_to_frame(
                         "count": int(count),
                         "percentage": round(100.0 * count / total, 6) if total else 0.0,
                         "n_missing": summary.n_missing,
+                        "n_non_finite": getattr(summary, "n_non_finite", 0),
                     }
                 )
         else:
@@ -468,6 +600,7 @@ def distributions_to_frame(
                         "count": int(count),
                         "percentage": round(100.0 * count / total, 6) if total else 0.0,
                         "n_missing": summary.n_missing,
+                        "n_non_finite": 0,
                     }
                 )
     return pd.DataFrame(rows)
@@ -480,6 +613,7 @@ def box_summaries_to_frame(summaries: dict[str, BoxSummary]) -> pd.DataFrame:
             "feature": name,
             "n_valid": summary.n_valid,
             "n_missing": summary.n_missing,
+            "n_non_finite": getattr(summary, "n_non_finite", 0),
             "min": summary.minimum,
             "lower_fence": summary.lower_fence,
             "q1": summary.q1,

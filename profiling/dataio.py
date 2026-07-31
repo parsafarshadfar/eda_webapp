@@ -85,19 +85,36 @@ class LoadedData:
 
 
 def _read_bytes(source: Any) -> tuple[bytes, str]:
-    """Return the raw bytes of ``source`` plus a human readable name."""
-    if isinstance(source, (str, os.PathLike)):
-        path = os.fspath(source)
-        with open(path, "rb") as handle:
-            return handle.read(), os.path.basename(path)
-
+    """Return a file-like source as bytes without changing its cursor."""
     name = getattr(source, "name", "uploaded_file")
-    if hasattr(source, "seek"):
-        source.seek(0)
-    payload = source.read()
+    original_position: int | None = None
+    if hasattr(source, "tell"):
+        try:
+            original_position = int(source.tell())
+        except (OSError, TypeError, ValueError):
+            original_position = None
+
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        payload = source.read()
+    finally:
+        if original_position is not None and hasattr(source, "seek"):
+            try:
+                source.seek(original_position)
+            except (OSError, TypeError, ValueError):
+                pass
+
     if isinstance(payload, str):
         payload = payload.encode("utf-8")
-    return payload, os.path.basename(str(name))
+    elif isinstance(payload, (bytearray, memoryview)):
+        payload = bytes(payload)
+    elif not isinstance(payload, bytes):
+        raise TypeError(
+            "load_table() expects a path or a file-like object whose read() "
+            "method returns bytes or text."
+        )
+    return payload, os.path.basename(str(name)) or "uploaded_file"
 
 
 def _token_for(payload: bytes) -> str:
@@ -111,6 +128,27 @@ def _token_for(payload: bytes) -> str:
         digest.update(payload[start : start + _HASH_CHUNK])
     digest.update(str(len(payload)).encode("ascii"))
     return digest.hexdigest()
+
+
+def _inspect_path(path: str | os.PathLike[str]) -> tuple[str, bytes]:
+    """Fingerprint a file incrementally and retain only its delimiter sample.
+
+    Reading a filesystem source directly through pandas avoids holding the raw
+    file and the parsed DataFrame in memory at the same time.  The digest stays
+    byte-for-byte compatible with :func:`_token_for`.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    sample = bytearray()
+    size = 0
+    with open(path, "rb") as handle:
+        while chunk := handle.read(_HASH_CHUNK):
+            digest.update(chunk)
+            size += len(chunk)
+            if len(sample) < _SNIFF_BYTES:
+                needed = _SNIFF_BYTES - len(sample)
+                sample.extend(chunk[:needed])
+    digest.update(str(size).encode("ascii"))
+    return digest.hexdigest(), bytes(sample)
 
 
 def _detect_delimiter(payload: bytes) -> str:
@@ -137,12 +175,17 @@ def _detect_delimiter(payload: bytes) -> str:
     return best if counts[best] > 0 else ","
 
 
-def _read_with_pyarrow(payload: bytes, delimiter: str) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(payload), engine="pyarrow", sep=delimiter)
+def _csv_source(source: Any) -> Any:
+    """Wrap byte payloads while leaving filesystem paths untouched."""
+    return io.BytesIO(source) if isinstance(source, bytes) else source
 
 
-def _read_with_c_parser(payload: bytes, delimiter: str) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(payload), sep=delimiter, low_memory=False)
+def _read_with_pyarrow(source: Any, delimiter: str) -> pd.DataFrame:
+    return pd.read_csv(_csv_source(source), engine="pyarrow", sep=delimiter)
+
+
+def _read_with_c_parser(source: Any, delimiter: str) -> pd.DataFrame:
+    return pd.read_csv(_csv_source(source), sep=delimiter, low_memory=False)
 
 
 def load_table(
@@ -168,23 +211,38 @@ def load_table(
         Try the multi-threaded PyArrow CSV parser first. The pandas C parser is
         used as a fallback and produces the same frame.
     """
-    payload, source_name = _read_bytes(source)
-    token = _token_for(payload)
-    sep = delimiter or _detect_delimiter(payload)
+    if delimiter is not None and (not isinstance(delimiter, str) or len(delimiter) != 1):
+        raise ValueError("delimiter must be exactly one character or None")
+
+    payload: bytes | None
+    if isinstance(source, (str, os.PathLike)):
+        path = os.fspath(source)
+        token, sample = _inspect_path(path)
+        parser_source: Any = path
+        source_name = os.path.basename(path) or str(path)
+        payload = None
+    else:
+        payload, source_name = _read_bytes(source)
+        token = _token_for(payload)
+        sample = payload[:_SNIFF_BYTES]
+        parser_source = payload
+
+    sep = delimiter if delimiter is not None else _detect_delimiter(sample)
 
     frame: pd.DataFrame | None = None
     parser = "pandas-c"
     if prefer_pyarrow:
         try:
-            frame = _read_with_pyarrow(payload, sep)
+            frame = _read_with_pyarrow(parser_source, sep)
             parser = "pyarrow"
         except Exception:
             frame = None
     if frame is None:
-        frame = _read_with_c_parser(payload, sep)
+        frame = _read_with_c_parser(parser_source, sep)
         parser = "pandas-c"
 
-    del payload
+    if payload is not None:
+        del payload
 
     original_dtypes = {str(col): str(dtype) for col, dtype in frame.dtypes.items()}
     memory_before = memory_usage_mb(frame)
@@ -219,47 +277,53 @@ def optimize_memory(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]]:
     demoting ``float64`` to ``float32`` would change statistics and is not
     acceptable for validation work.
     """
+    if not frame.columns.is_unique:
+        raise ValueError("optimize_memory() requires unique column names.")
+
     applied: dict[str, str] = {}
-    new_columns: dict[str, pd.Series] = {}
+    optimized = frame
 
     for name in frame.columns:
         series = frame[name]
         dtype = series.dtype
         kind = getattr(dtype, "kind", "")
+        converted: pd.Series | None = None
 
-        if kind in "iu":
+        if kind in ("i", "u"):
             downcast = "unsigned" if kind == "u" else "integer"
             converted = pd.to_numeric(series, downcast=downcast)
-            if converted.dtype != dtype:
-                new_columns[name] = converted
-                applied[str(name)] = f"{dtype} -> {converted.dtype}"
-            continue
-
-        if isinstance(dtype, pd.CategoricalDtype) or kind == "f" or kind == "b":
-            continue
-
-        if _is_text_dtype(dtype):
+        elif (
+            not isinstance(dtype, pd.CategoricalDtype)
+            and kind not in ("f", "b")
+            and _is_text_dtype(dtype)
+        ):
             n_rows = len(series)
             if n_rows == 0:
                 continue
             n_unique = int(series.nunique(dropna=True))
             if n_unique <= _CATEGORY_MAX_CARDINALITY and n_unique <= _CATEGORY_MAX_UNIQUE_RATIO * n_rows:
-                new_columns[name] = series.astype("category")
-                applied[str(name)] = f"{dtype} -> category"
+                converted = series.astype("category")
 
-    if new_columns:
-        frame = frame.copy(deep=False)
-        for name, series in new_columns.items():
-            frame[name] = series
+        if converted is None or converted.dtype == dtype:
+            continue
 
-    return frame, applied
+        # Copy the frame lazily, then install each converted column immediately.
+        # The previous implementation retained every converted Series in a
+        # dictionary until the end, which could temporarily double the memory
+        # used by all optimised columns on a wide dataset.
+        if optimized is frame:
+            optimized = frame.copy(deep=False)
+        optimized[name] = converted
+        applied[str(name)] = f"{dtype} -> {converted.dtype}"
+
+    return optimized, applied
 
 
 def _is_text_dtype(dtype: Any) -> bool:
     """True for object/str columns across pandas 2.x and 3.x."""
     if isinstance(dtype, pd.CategoricalDtype):
         return False
-    if getattr(dtype, "kind", "") in "OU":
+    if getattr(dtype, "kind", "") in ("O", "U"):
         return True
     return pd.api.types.is_string_dtype(dtype)
 
@@ -276,7 +340,7 @@ def is_numeric_series(series: pd.Series) -> bool:
     dtype = series.dtype
     if isinstance(dtype, pd.CategoricalDtype):
         return False
-    if pd.api.types.is_bool_dtype(dtype):
+    if pd.api.types.is_bool_dtype(dtype) or pd.api.types.is_complex_dtype(dtype):
         return False
     return pd.api.types.is_numeric_dtype(dtype)
 
@@ -293,8 +357,18 @@ def is_categorical_series(series: pd.Series) -> bool:
 
 def numeric_columns(frame: pd.DataFrame, columns: list[str] | None = None) -> list[str]:
     """Names of the numeric columns, preserving the requested order."""
+    if not frame.columns.is_unique:
+        raise ValueError("Numeric feature selection requires unique column names.")
     candidates = list(frame.columns) if columns is None else [c for c in columns if c in frame.columns]
-    return [c for c in candidates if is_numeric_series(frame[c])]
+    selected: list[str] = []
+    seen: set[Any] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if is_numeric_series(frame[candidate]):
+            selected.append(candidate)
+    return selected
 
 
 def dtype_summary(frame: pd.DataFrame) -> pd.DataFrame:
@@ -373,7 +447,22 @@ def combine_datasets(
     if not data:
         raise ValueError("combine_datasets() was given an empty mapping of frames.")
 
-    frames = {str(key): value for key, value in data.items()}
+    frames: dict[str, Any] = {}
+    for key, value in data.items():
+        label = str(key)
+        if label in frames:
+            raise ValueError(
+                "Dataset labels must remain unique when converted to text; "
+                f"more than one key becomes {label!r}."
+            )
+        if not hasattr(value, "columns") or not hasattr(value, "shape"):
+            raise TypeError(f"Frame {label!r} is not a DataFrame-like object.")
+        frames[label] = value
+
+    spark_flags = {_spark.is_spark(frame) for frame in frames.values()}
+    if len(spark_flags) != 1:
+        raise TypeError("Cannot combine pandas and Spark frames in the same mapping.")
+
     for key, frame in frames.items():
         if tag_column in list(frame.columns):
             raise ValueError(
@@ -386,8 +475,17 @@ def combine_datasets(
         combined = _spark.spark_concat(frames, tag_column)
     else:
         combined = pd.concat(list(frames.values()), ignore_index=True)
-        combined[tag_column] = np.repeat(
-            list(frames.keys()), [int(frame.shape[0]) for frame in frames.values()]
+        lengths = np.fromiter(
+            (int(frame.shape[0]) for frame in frames.values()),
+            dtype=np.intp,
+            count=len(frames),
+        )
+        max_code = max(len(frames) - 1, 0)
+        code_dtype = np.min_scalar_type(max_code)
+        codes = np.repeat(np.arange(len(frames), dtype=code_dtype), lengths)
+        combined[tag_column] = pd.Categorical.from_codes(
+            codes,
+            categories=list(frames),
         )
 
     feature_names = [str(column) for column in combined.columns if str(column) != tag_column]
@@ -461,6 +559,11 @@ def merge_one_hot_encoded_columns(
     zero is attributed to the first column of the group rather than reported as
     unknown. Rows where the whole group is null stay null.
     """
+    if not data.columns.is_unique:
+        raise ValueError("merge_one_hot_encoded_columns() requires unique column names.")
+    if not separator and isinstance(features, str) and features.lower() == "auto":
+        raise ValueError("separator cannot be empty when features='auto'.")
+
     if isinstance(features, Mapping):
         groups = {str(key): list(value) for key, value in features.items()}
     elif isinstance(features, str):
@@ -472,22 +575,71 @@ def merge_one_hot_encoded_columns(
     else:
         groups = _dummy_groups_by_prefix(list(data.columns), features)
 
-    merged = data
+    replacements: dict[Any, tuple[str, pd.Series]] = {}
+    consumed: set[Any] = set()
+
     for feature, dummies in groups.items():
-        present = [column for column in dummies if column in merged.columns]
+        present = [column for column in dummies if column in data.columns]
         if len(present) < 2:
             continue
 
-        position = merged.columns.get_loc(present[0])
-        winner = merged[present].idxmax(axis=1, skipna=True)
+        overlap = consumed.intersection(present)
+        if overlap:
+            raise ValueError(
+                f"Dummy columns cannot belong to more than one feature group: {sorted(map(str, overlap))}."
+            )
+        if feature in data.columns and feature not in present:
+            raise ValueError(
+                f"Cannot create merged feature {feature!r}: a column with that name already exists."
+            )
+
+        block = data[present]
+        if any(
+            not (
+                pd.api.types.is_numeric_dtype(dtype)
+                or pd.api.types.is_bool_dtype(dtype)
+            )
+            for dtype in block.dtypes
+        ):
+            raise TypeError(
+                f"Dummy group {feature!r} must contain only numeric or boolean columns."
+            )
+
+        all_missing = block.isna().all(axis=1)
+        winner = pd.Series(pd.NA, index=data.index, dtype=object)
+        present_rows = ~all_missing
+        if bool(present_rows.any()):
+            winner.loc[present_rows] = block.loc[present_rows].idxmax(
+                axis=1,
+                skipna=True,
+            )
         if strip_prefix:
             prefix = f"{feature}{separator}"
             winner = winner.map(
-                lambda value, p=prefix: value[len(p) :]
-                if isinstance(value, str) and value.startswith(p)
-                else value
+                {
+                    dummy: (
+                        dummy[len(prefix) :]
+                        if isinstance(dummy, str) and dummy.startswith(prefix)
+                        else dummy
+                    )
+                    for dummy in present
+                },
+                na_action="ignore",
             )
-        merged = merged.drop(present, axis=1)
-        merged.insert(position, feature, winner)
 
-    return merged if merged is not data else data.copy()
+        replacements[present[0]] = (feature, winner.rename(feature))
+        consumed.update(present)
+
+    if not replacements:
+        return data.copy()
+
+    # Assemble the result once. Repeated drop/insert operations copy a wide
+    # DataFrame for every dummy group and become quadratic in the column count.
+    columns: list[pd.Series] = []
+    for name, series in data.items():
+        replacement = replacements.get(name)
+        if replacement is not None:
+            columns.append(replacement[1])
+        elif name not in consumed:
+            columns.append(series)
+    return pd.concat(columns, axis=1)

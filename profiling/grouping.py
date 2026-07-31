@@ -18,7 +18,7 @@ bucketing in Spark instead of collecting the column onto the driver.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator, Sequence
 
 import numpy as np
@@ -63,6 +63,7 @@ class Segment:
     grouping_var: str
     index: pd.Index
     n_rows: int
+    positions: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def label(self) -> str:
@@ -122,9 +123,17 @@ class Grouping:
 
     def frames(self, data: Any) -> Iterator[tuple[Segment, Any]]:
         """Yield ``(segment, rows_of_that_segment)`` one segment at a time."""
+        if not self.is_grouped:
+            # Avoid an unnecessary whole-frame copy for the common ungrouped
+            # path, and remain correct when the frame index contains duplicates.
+            yield self.segments[0], data
+            return
+
         spark = _spark.is_spark(data)
         for segment in self.segments:
-            if spark:
+            if segment.positions is not None:
+                yield segment, data.iloc[segment.positions]
+            elif spark:
                 yield segment, data.iloc[segment.index.to_numpy()]
             else:
                 yield segment, data.loc[segment.index]
@@ -157,6 +166,8 @@ def _resolve_series(data: Any, by: Any) -> Any:
 
     if isinstance(by, (np.ndarray, np.generic, list, tuple)):
         values = np.asarray(by)
+        if values.ndim != 1:
+            raise ValueError("Grouping arrays must be one-dimensional.")
         if values.shape[0] != data.shape[0]:
             raise ValueError(
                 f"Grouping array has {values.shape[0]} values but the data has {data.shape[0]} rows."
@@ -166,6 +177,17 @@ def _resolve_series(data: Any, by: Any) -> Any:
         if not _spark.is_spark(data):
             series.index = data.index
         return series
+
+    if not hasattr(by, "name") or not hasattr(by, "index"):
+        raise TypeError("by must be a column name, a Series, or a one-dimensional array")
+    if len(by) != data.shape[0]:
+        raise ValueError(
+            f"Grouping Series has {len(by)} values but the data has {data.shape[0]} rows."
+        )
+    if not _spark.is_spark(data) and not by.index.equals(data.index):
+        if not by.index.is_unique:
+            raise ValueError("A grouping Series with a different index must have unique labels.")
+        by = by.reindex(data.index)
 
     if by.name is None:
         by = by.rename(_ANONYMOUS_SERIES)
@@ -195,7 +217,7 @@ def _pandas_groups(
     bins: Sequence[tuple[float, float]] | None,
     n_bins: int | None,
     n_quantiles: int | None,
-) -> dict[Any, pd.Index]:
+) -> dict[Any, tuple[pd.Index, np.ndarray]]:
     if method == BY_VALUE:
         grouped = series.groupby(series, observed=True)
     elif method == BY_INTERVALS:
@@ -204,8 +226,58 @@ def _pandas_groups(
     elif method == BY_EQUAL_WIDTH:
         grouped = series.groupby(pd.cut(series, bins=int(n_bins)), observed=True)
     else:
-        grouped = series.groupby(pd.qcut(series, q=int(n_quantiles)), observed=True)
-    return dict(grouped.groups)
+        grouped = series.groupby(
+            pd.qcut(series, q=int(n_quantiles), duplicates="drop"),
+            observed=True,
+        )
+
+    # Keep the user-visible index labels for inspection, plus positional
+    # indices for slicing. Label-based slicing duplicates rows when a DataFrame
+    # itself has duplicate index labels.
+    return {
+        key: (
+            pd.Index(index),
+            np.asarray(grouped.indices[key], dtype=np.intp),
+        )
+        for key, index in grouped.groups.items()
+    }
+
+
+def _validate_grouping_request(
+    bins: Sequence[tuple[float, float]] | None,
+    n_bins: int | None,
+    n_quantiles: int | None,
+) -> None:
+    """Fail early with clear messages for malformed bucket settings."""
+    for name, value in (("n_bins", n_bins), ("n_quantiles", n_quantiles)):
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(f"{name} must be a positive integer or None")
+        if int(value) <= 0:
+            raise ValueError(f"{name} must be a positive integer or None")
+
+    if bins is None:
+        return
+    if len(bins) == 0:
+        raise ValueError("bins must contain at least one (left, right) interval")
+    for position, interval in enumerate(bins):
+        try:
+            has_endpoints = len(interval) >= 2
+        except TypeError:
+            has_endpoints = False
+        if not has_endpoints:
+            raise ValueError(f"bins[{position}] must contain a left and right endpoint")
+        left, right = interval[:2]
+        try:
+            valid = np.isfinite(left) and np.isfinite(right) and float(left) < float(right)
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise ValueError(
+                f"bins[{position}] must have finite endpoints with left < right; "
+                f"got {interval!r}."
+            )
 
 
 def make_grouping(
@@ -243,8 +315,13 @@ def make_grouping(
         Empty segments are dropped. Segments come out in ascending key order
         for values and in interval order for the three binned modes.
     """
+    method = _selected_method(bins, n_bins, n_quantiles)
+    _validate_grouping_request(bins, n_bins, n_quantiles)
+
     if _spark.is_spark_sql(data):
         data = _spark.to_pandas_api(data)
+    if isinstance(data, pd.DataFrame) and not data.columns.is_unique:
+        raise ValueError("make_grouping() requires unique column names.")
 
     n_rows_total = int(data.shape[0])
 
@@ -263,7 +340,6 @@ def make_grouping(
             n_rows_total=n_rows_total,
         )
 
-    method = _selected_method(bins, n_bins, n_quantiles)
     series = _resolve_series(data, by)
     grouping_var = str(series.name)
 
@@ -274,11 +350,30 @@ def make_grouping(
     else:
         groups = _pandas_groups(series, method, bins, n_bins, n_quantiles)
 
-    segments = tuple(
-        Segment(key=str(key), grouping_var=grouping_var, index=index, n_rows=int(len(index)))
-        for key, index in groups.items()
-        if len(index) > 0
-    )
+    segment_list: list[Segment] = []
+    segment_keys: set[str] = set()
+    spark_series = _spark.is_spark(series)
+    for key, group in groups.items():
+        index, positions = (group, None) if spark_series else group
+        if len(index) == 0:
+            continue
+        text_key = str(key)
+        if text_key in segment_keys:
+            raise ValueError(
+                "Grouping values must remain unique when converted to text; "
+                f"more than one value becomes {text_key!r}."
+            )
+        segment_keys.add(text_key)
+        segment_list.append(
+            Segment(
+                key=text_key,
+                grouping_var=grouping_var,
+                index=index,
+                n_rows=int(len(index)),
+                positions=positions,
+            )
+        )
+    segments = tuple(segment_list)
     return Grouping(
         grouping_var=grouping_var,
         method=method,

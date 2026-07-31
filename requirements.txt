@@ -1,12 +1,14 @@
-# Runtime dependencies for the Data Profiler Dashboard.
+# Runtime dependencies for the unified Profiling + Drift Assessment app.
 #
 # Requires Python 3.12 or 3.13. On Streamlit Community Cloud the interpreter is
 # chosen under Advanced settings when the app is deployed; SciPy 1.18 does not
 # publish wheels for Python 3.11 or older.
 #
-# Versions are pinned exactly so a profiling report can be reproduced later,
-# which matters when the output is used as evidence. The application code is
-# also tested against the older set listed at the bottom of this file.
+# Versions are pinned exactly so profiling and drift reports can be reproduced
+# later, which matters when results are used as evidence. These are the current
+# stable releases as of 2026-07-30, except PyArrow: Streamlit 1.60 requires
+# PyArrow <25, so 24.0.0 is the newest compatible release. The application code
+# is also tested against the older set listed at the bottom of this file.
 
 streamlit==1.60.0
 pandas==3.0.5
@@ -19,6 +21,29 @@ openpyxl==3.1.5
 # Streamlit already depends on PyArrow; it is pinned here because the CSV
 # loader prefers PyArrow's multi-threaded parser. Streamlit 1.60 requires <25.
 pyarrow==24.0.0
+
+# --- Running the example notebooks -------------------------------------------
+# profiling_examples/ and drift_examples/ need a Jupyter kernel, and Plotly
+# needs nbformat to render a figure inside a notebook. Neither is imported by
+# app.py, profiling/ or drift/, so a deployment that only serves the app can
+# drop this block.
+ipykernel==7.3.0
+nbformat==5.10.4
+
+# Only needed to re-run a notebook top to bottom and save it with its outputs
+# (the two example notebooks ship already executed):
+#   pip install nbclient==0.11.0
+#   python -m nbclient drift_examples/drift_walkthrough.ipynb
+
+# --- Optional ----------------------------------------------------------------
+# Both packages read Spark frames and write to DBFS/ADLS through dbutils when
+# they are available, and import nothing Spark-related otherwise. On Databricks
+# both are provided by the cluster runtime, so pyspark is deliberately not
+# pinned here.
+
+# --- Tests -------------------------------------------------------------------
+# Uncomment to run `python -m pytest tests -q`.
+# pytest==9.1.1
 
 # Tested and supported alternative for Python 3.12 deployments that cannot move
 # to the versions above:

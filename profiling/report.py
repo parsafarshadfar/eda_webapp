@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import textwrap
@@ -28,6 +29,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
+from . import storage
 from .pipeline import ProfilingResult, SegmentedResult
 from .static import (
     A4_LANDSCAPE,
@@ -268,6 +270,47 @@ class _PdfWriter:
         return self._page
 
 
+def _histogram_pages(
+    summaries: Sequence,
+    *,
+    n_cols: int,
+    n_rows: int,
+    show_percentage: bool,
+    title: str = "Distributions",
+) -> Iterator[Figure]:
+    """Yield histogram grid pages one at a time to cap export memory."""
+    per_page = n_cols * n_rows
+    n_pages = max(1, math.ceil(len(summaries) / per_page))
+    for page, start in enumerate(range(0, len(summaries), per_page), start=1):
+        heading = title if n_pages == 1 else f"{title} ({page}/{n_pages})"
+        yield histogram_grid_figures(
+            summaries[start : start + per_page],
+            n_cols=n_cols,
+            n_rows=n_rows,
+            show_percentage=show_percentage,
+            title=heading,
+            color_offset=start,
+        )[0]
+
+
+def _box_pages(
+    summaries: Sequence,
+    *,
+    n_rows: int,
+    title: str = "Outliers",
+) -> Iterator[Figure]:
+    """Yield box-plot grid pages one at a time to cap export memory."""
+    n_pages = max(1, math.ceil(len(summaries) / n_rows))
+    for page, start in enumerate(range(0, len(summaries), n_rows), start=1):
+        heading = title if n_pages == 1 else f"{title} ({page}/{n_pages})"
+        yield box_grid_figures(
+            summaries[start : start + n_rows],
+            n_rows=n_rows,
+            title=heading,
+            color_offset=start,
+        )[0]
+
+
 # --------------------------------------------------------------------------- #
 # PDF
 # --------------------------------------------------------------------------- #
@@ -332,7 +375,7 @@ def build_pdf(result: ProfilingResult) -> bytes:
         if settings.include_histograms and result.distributions:
             summaries = list(result.distributions.values())
             writer.add_all(
-                histogram_grid_figures(
+                _histogram_pages(
                     summaries,
                     n_cols=3,
                     n_rows=3,
@@ -343,7 +386,11 @@ def build_pdf(result: ProfilingResult) -> bytes:
 
         if settings.include_box_plots and result.box_summaries:
             writer.add_all(
-                box_grid_figures(list(result.box_summaries.values()), n_rows=6, title="5. Outliers")
+                _box_pages(
+                    list(result.box_summaries.values()),
+                    n_rows=6,
+                    title="5. Outliers",
+                )
             )
 
         writer.add(_methodology_page())
@@ -494,7 +541,13 @@ def bundle_files(
         return frame.to_csv(index=index, lineterminator="\n").encode("utf-8")
 
     def as_png(figure: Figure, dpi: int = 160, crop: bool = False) -> bytes:
-        return figure_to_png(figure, dpi=dpi, crop=crop)
+        try:
+            return figure_to_png(figure, dpi=dpi, crop=crop)
+        finally:
+            # Grid builders return a list of figures. Clearing each page as soon
+            # as it is encoded releases its artists and backing arrays even
+            # while that list remains alive for the rest of the iteration.
+            figure.clear()
 
     yield "metadata.json", json.dumps(result.metadata(), indent=2, default=str).encode("utf-8")
 
@@ -547,18 +600,13 @@ def bundle_files(
             f"{folder}/histogram_bins.csv",
             as_csv(distributions_to_frame(result.distributions), index=False),
         )
+        # One image per feature: a nine-up grid is fine in the paginated PDF but
+        # useless as a file, because a single feature cannot be lifted out of it.
         summaries = list(result.distributions.values())
-        for page, figure in enumerate(
-            histogram_grid_figures(
-                summaries, n_cols=3, n_rows=3, show_percentage=settings.show_percentage
-            ),
-            start=1,
-        ):
-            yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
         if include_individual_charts and len(summaries) <= max_individual_charts:
             for index, summary in enumerate(summaries):
                 yield (
-                    f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
+                    f"{folder}/charts/{safe_filename(summary.feature)}.png",
                     as_png(
                         histogram_figure(
                             summary,
@@ -567,6 +615,17 @@ def bundle_files(
                         )
                     ),
                 )
+        else:
+            for page, figure in enumerate(
+                _histogram_pages(
+                    summaries,
+                    n_cols=3,
+                    n_rows=3,
+                    show_percentage=settings.show_percentage,
+                ),
+                start=1,
+            ):
+                yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
 
     if settings.include_box_plots and result.box_summaries:
         folder = "05_outliers"
@@ -575,14 +634,16 @@ def bundle_files(
             as_csv(box_summaries_to_frame(result.box_summaries).round(6), index=False),
         )
         summaries = list(result.box_summaries.values())
-        for page, figure in enumerate(box_grid_figures(summaries, n_rows=6), start=1):
-            yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
         if include_individual_charts and len(summaries) <= max_individual_charts:
             for index, summary in enumerate(summaries):
                 yield (
-                    f"{folder}/by_feature/{index + 1:03d}_{safe_filename(summary.feature)}.png",
+                    f"{folder}/charts/{safe_filename(summary.feature)}.png",
                     as_png(box_figure(summary, color=_palette_color(index))),
                 )
+        else:
+            # Too many features to write one file each: fall back to the grids.
+            for page, figure in enumerate(_box_pages(summaries, n_rows=6), start=1):
+                yield f"{folder}/overview_page_{page:02d}.png", as_png(figure)
 
     if include_pdf:
         yield "report.pdf", (pdf_bytes if pdf_bytes is not None else build_pdf(result))
@@ -624,7 +685,7 @@ def build_zip(
 # --------------------------------------------------------------------------- #
 def write_report_dir(
     result: ProfilingResult,
-    folder: str | os.PathLike[str],
+    folder: str | os.PathLike[str] | None = None,
     *,
     include_pdf: bool = True,
     include_individual_charts: bool = True,
@@ -634,8 +695,13 @@ def write_report_dir(
     """Write the export bundle into ``folder`` as ordinary files.
 
     Same contents and same layout as :func:`build_zip`, unpacked. This is the
-    form a notebook or a batch job wants: the numbers land on disk next to the
-    script that produced them instead of inside an archive.
+    form a notebook or a batch job wants: the numbers land beside the script
+    that produced them instead of inside an archive.
+
+    ``folder`` defaults to the standard output folder
+    (:func:`profiling.output_dir`) plus the run's own name, so a bundle never
+    lands in an unexpected place. A DBFS or ADLS address is accepted too: each
+    file is rendered in memory and written in a single operation.
 
     Existing files of the same name are overwritten; anything else already in the
     folder is left alone.
@@ -643,9 +709,13 @@ def write_report_dir(
     Returns
     -------
     list of str
-        Absolute paths of the files written, in the order they were written.
+        Addresses of the files written, in the order they were written.
     """
-    root = os.fspath(folder)
+    root = (
+        storage.join_address(storage.default_output_dir(), suggested_basename(result))
+        if folder is None
+        else storage.resolve_dir(folder)
+    )
     written: list[str] = []
     for path, payload in bundle_files(
         result,
@@ -654,17 +724,13 @@ def write_report_dir(
         max_individual_charts=max_individual_charts,
         pdf_bytes=pdf_bytes,
     ):
-        target = os.path.join(root, *path.split("/"))
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as handle:
-            handle.write(payload)
-        written.append(os.path.abspath(target))
+        written.append(storage.write_bytes(storage.join_address(root, *path.split("/")), payload))
     return written
 
 
 def write_segmented_report_dir(
     segmented: SegmentedResult,
-    folder: str | os.PathLike[str],
+    folder: str | os.PathLike[str] | None = None,
     *,
     include_pdf: bool = True,
     include_individual_charts: bool = True,
@@ -680,23 +746,33 @@ def write_segmented_report_dir(
         <folder>/Age=(10.0, 26.5]/       one full bundle for that segment
         <folder>/Age=(26.5, 43.0]/       ...
 
+    ``folder`` defaults to the standard output folder
+    (:func:`profiling.output_dir`) plus the run's own name, and may equally be a
+    DBFS or ADLS address.
+
     Returns
     -------
     dict
-        ``{segment key or "00_comparison": [paths written]}``.
+        ``{segment key or "00_comparison": [addresses written]}``.
     """
-    root = os.fspath(folder)
+    root = (
+        storage.join_address(
+            storage.default_output_dir(),
+            f"{safe_filename(segmented.dataset_name.rsplit('.', 1)[0], 'dataset')}_segmented",
+        )
+        if folder is None
+        else storage.resolve_dir(folder)
+    )
     written: dict[str, list[str]] = {}
 
-    comparison_root = os.path.join(root, safe_dirname(comparison_folder))
-    os.makedirs(comparison_root, exist_ok=True)
+    comparison_root = storage.join_address(root, safe_dirname(comparison_folder))
+    storage.ensure_dir(comparison_root)
     comparison_paths: list[str] = []
 
     def write_comparison(name: str, payload: bytes) -> None:
-        target = os.path.join(comparison_root, name)
-        with open(target, "wb") as handle:
-            handle.write(payload)
-        comparison_paths.append(os.path.abspath(target))
+        comparison_paths.append(
+            storage.write_bytes(storage.join_address(comparison_root, name), payload)
+        )
 
     write_comparison(
         "metadata.json", json.dumps(segmented.metadata(), indent=2, default=str).encode("utf-8")
@@ -727,7 +803,7 @@ def write_segmented_report_dir(
         label = segmented.grouping[key].label if segmented.grouping.is_grouped else key
         written[key] = write_report_dir(
             result,
-            os.path.join(root, safe_dirname(label)),
+            storage.join_address(root, safe_dirname(label)),
             include_pdf=include_pdf,
             include_individual_charts=include_individual_charts,
             max_individual_charts=max_individual_charts,

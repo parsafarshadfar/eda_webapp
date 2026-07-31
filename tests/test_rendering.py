@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -15,13 +14,13 @@ import profiling
 
 
 @contextmanager
-def working_directory(path: Path):
-    previous = Path.cwd()
-    os.chdir(path)
+def output_directory(path: Path):
+    """Point profiling's standard output folder at ``path`` for one block."""
+    profiling.set_output_dir(path)
     try:
         yield
     finally:
-        os.chdir(previous)
+        profiling.reset_output_dir()
 
 
 class StaticRenderingTests(unittest.TestCase):
@@ -63,7 +62,12 @@ class StaticRenderingTests(unittest.TestCase):
         self.assertEqual(to_hex(rendered[(0, 1)].get_facecolor()), "#2f4b63")
 
     def test_text_stays_within_cells(self) -> None:
-        loaded = profiling.load_table("Examples/Data/HousingData_TrainData.csv")
+        loaded = profiling.load_table(
+            Path(__file__).resolve().parents[1]
+            / "profiling_examples"
+            / "Data"
+            / "HousingData_TrainData.csv"
+        )
         frame = profiling.describe_data(loaded.frame).head(7)
         figure = profiling.table_figures(
             frame,
@@ -103,10 +107,16 @@ class StaticRenderingTests(unittest.TestCase):
             pd.Series([1.0, 2.0, 3.0], name="Income")
         )
         with tempfile.TemporaryDirectory() as directory:
-            with working_directory(Path(directory)):
+            with output_directory(Path(directory)):
                 profiling.histogram_figure(summary, save=True)
-                target = profiling.DEFAULT_SAVE_DIR / "Income_histogram.png"
-                self.assertTrue(target.is_file())
+                self.assertTrue((Path(directory) / "Income_histogram.png").is_file())
+
+    def test_standard_output_folder_defaults_beside_the_repository(self) -> None:
+        default = Path(profiling.output_dir())
+
+        self.assertEqual(default.name, "profiling")
+        self.assertEqual(default.parent.name, "results")
+        self.assertEqual(default.parent.parent, Path(__file__).resolve().parents[1])
 
     def test_paginated_save_uses_numbered_names(self) -> None:
         frame = pd.DataFrame({"value": [1, 2, 3]})
@@ -226,11 +236,9 @@ class StaticRenderingTests(unittest.TestCase):
             named_target = root / "named" / "convenience.png"
             profiling.df_to_img(frame, save=True, save_name=named_target)
             self.assertTrue(named_target.is_file())
-            with working_directory(root):
+            with output_directory(root / "standard"):
                 profiling.df_to_img(frame, save=True)
-                self.assertTrue(
-                    (profiling.DEFAULT_SAVE_DIR / "dataframe.png").is_file()
-                )
+                self.assertTrue((root / "standard" / "dataframe.png").is_file())
 
     def test_pdf_and_bundle_descriptive_tables_use_df_to_img(self) -> None:
         frame = pd.DataFrame(
